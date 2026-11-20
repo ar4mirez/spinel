@@ -235,42 +235,142 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
     );
 }
 
-/// A known difference from Bundler (#816): `tests/fixtures/resolver/oracle/
-/// case0138`, the one of 400 random indexes (`differential.py`, seed 1) on
-/// which Spinel and Bundler 4.0.20 disagree. Bundler retries with `g1`'s
-/// prereleases but not `g2`'s, and reports the conflict ("g2 >= 2.0, < 3.0
-/// could not be found"); Spinel also retries with `g2`'s, through the
-/// single-term case of `names_to_relax`, and resolves with `g2 (2.1.rc1)`.
-/// This asserts what Spinel does, so a change to it is seen; closing the
-/// difference turns it into Bundler's conflict.
-#[test]
-fn known_difference_case0138_takes_a_prerelease_bundler_leaves_out() {
-    let gems = index(&[
-        (
-            "g0",
-            "2.1.rc1 g1:>= 0,g2:>= 2.0.a,g3:< 2.0.beta\n\
-             2.0 g1:~> 2.0.a\n\
-             3.0 g1:>= 1.0&< 3,g2:~> 1.0,g3:>= 1.0&< 3\n",
-        ),
-        (
-            "g1",
-            "2.0.beta g2:>= 2.0,g3:~> 2.0.a\n\
-             0.9\n\
-             2.1.rc1 g3:= 2.0.beta\n\
-             1.0 g2:>= 0,g3:= 2.0.beta\n",
-        ),
-        ("g2", "3.0 g3:~> 1.0\n2.0.beta\n1.1 g3:~> 2.0.a\n2.1.rc1\n"),
-        ("g3", "2.0.a\n2.1.rc1\n2.0\n"),
-    ]);
-    let r = request(
-        vec![dep("g0", &[]), dep("g3", &[])],
-        &["x86_64-linux"],
-        "4.0.0",
-    );
+// Known differences from Bundler (#816): random indexes from
+// `tests/fixtures/resolver/differential.py` on which Spinel and Bundler
+// 4.0.20 disagree, kept under `tests/fixtures/resolver/oracle/` (`case0138`
+// is seed 1's; the others are named for their seed and case). pubgrub-rs
+// derives a failure along other incompatibilities than pubgrub-ruby, so the
+// gems `names_to_relax` finds along it are not always those Bundler's
+// `find_names_to_relax` finds: Spinel lets in prereleases Bundler leaves out
+// and resolves where Bundler reports a conflict, or resolves to other
+// versions. Each test records both outcomes and asserts Spinel's, so a change
+// to it is seen; once the resolver derives as pubgrub-ruby does (#816), each
+// becomes a test that Spinel resolves as Bundler does.
+
+/// The index and Gemfile of `tests/fixtures/resolver/oracle/<name>`, as
+/// `bundle_case.sh` serves them to Bundler.
+fn oracle_case(name: &str) -> (Request, Index) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/resolver/oracle")
+        .join(name);
+    let mut gems = Vec::new();
+    for entry in std::fs::read_dir(dir.join("info")).unwrap() {
+        let path = entry.unwrap().path();
+        let gem = path.file_name().unwrap().to_str().unwrap().to_owned();
+        gems.push((gem, std::fs::read_to_string(&path).unwrap()));
+    }
+    let gems: Vec<(&str, &str)> = gems.iter().map(|(g, i)| (g.as_str(), i.as_str())).collect();
+    // `gem "name", "requirement", ...`: the quoted strings.
+    let deps = std::fs::read_to_string(dir.join("Gemfile.gems"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let quoted: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+            dep(quoted[0], &quoted[1..])
+        })
+        .collect();
+    (request(deps, &["x86_64-linux"], "4.0.0"), index(&gems))
+}
+
+/// Bundler reports a conflict.
+const CONFLICT: Option<&[&str]> = None;
+
+/// Asserts that Spinel still resolves `case` as `spinel` records (`None` for
+/// a conflict), where Bundler 4.0.20 does as `bundler` records.
+fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]>) {
+    assert_ne!(bundler, spinel, "{case}: not a difference");
+    let (r, gems) = oracle_case(case);
+    let ours = match resolve(&r, &gems) {
+        Ok(specs) => Some(specs.iter().map(ToString::to_string).collect::<Vec<_>>()),
+        Err(Failure::Conflict(_)) => None,
+        Err(e) => panic!("{case}: {e}"),
+    };
+    let ours: Option<Vec<&str>> = ours
+        .as_ref()
+        .map(|s| s.iter().map(String::as_str).collect());
     assert_eq!(
-        resolved(&r, &gems),
-        ["g0 (2.0)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g3 (2.0)"]
+        ours.as_deref(),
+        spinel,
+        "{case}: Spinel's outcome changed; Bundler 4.0.20's is {bundler:?}. \
+         If they now match, make this a test that Spinel resolves as Bundler does (#816)."
     );
+}
+
+macro_rules! known_differences {
+    ($($(#[$doc:meta])* $test:ident: $case:literal, bundler: $bundler:expr, spinel: $spinel:expr;)*) => {
+        $(
+            $(#[$doc])*
+            #[test]
+            fn $test() {
+                known_difference($case, $bundler, $spinel);
+            }
+        )*
+    };
+}
+
+known_differences! {
+    /// Bundler retries with `g1`'s and `g3`'s prereleases and reports the
+    /// conflict; Spinel also relaxes `g0`, then `g2`, and resolves.
+    known_difference_case0138: "case0138",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (2.0)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g3 (2.0)"]);
+    /// Bundler relaxes `g0` and `g4` and reports the conflict; Spinel also
+    /// relaxes `g1` and `g2` and resolves.
+    known_difference_seed816_case0015: "seed816-case0015",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (3.0.pre)", "g1 (1.1)", "g2 (2.0.beta)", "g4 (3.0)"]);
+    /// Bundler relaxes `g0`, `g2` and `g4`, then `g3`, and reports the
+    /// conflict; Spinel relaxes `g1` with `g3` and resolves.
+    known_difference_seed816_case0358: "seed816-case0358",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (2.1.rc1)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g4 (3.0)"]);
+    /// Bundler relaxes `g3` and `g4` and reports the conflict; Spinel also
+    /// relaxes `g1` and `g2` and resolves.
+    known_difference_seed816_case0393: "seed816-case0393",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (3.0.pre)", "g1 (2.1.rc1)", "g2 (2.1.rc1)"]);
+    /// Bundler finds nothing to relax and reports the conflict; Spinel
+    /// relaxes `g3` and resolves.
+    known_difference_seed816_case0669: "seed816-case0669",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (2.1.rc1)", "g2 (3.0)", "g3 (2.0.beta)", "g4 (1.0)"]);
+    /// Bundler relaxes `g1`, `g2` and `g3`, then `g4`, and reports the
+    /// conflict; Spinel relaxes `g0` where Bundler relaxes `g1`, then `g1`
+    /// with `g4`, and resolves.
+    known_difference_seed816_case0969: "seed816-case0969",
+        bundler: CONFLICT,
+        spinel: Some(&["g0 (2.1.rc1)", "g2 (3.0.pre)", "g3 (3.0.pre)", "g4 (3.0.pre)"]);
+    /// Both resolve after relaxing `g1`; Spinel also relaxes `g0` and
+    /// resolves to other versions.
+    known_difference_seed816_case0231: "seed816-case0231",
+        bundler: Some(&["g0 (2.0)", "g1 (2.1.rc1)", "g2 (3.0)", "g3 (1.1)"]),
+        spinel: Some(&["g0 (3.0.pre)", "g1 (1.1)"]);
+    /// Both resolve after relaxing `g0` and `g2`; Spinel also relaxes `g1`
+    /// and resolves to other versions.
+    known_difference_seed816_case0377: "seed816-case0377",
+        bundler: Some(&["g0 (2.1.rc1)"]),
+        spinel: Some(&["g0 (2.0)", "g1 (2.1.rc1)", "g2 (2.0.beta)"]);
+    /// Both resolve after relaxing `g0` and `g3`; Spinel also relaxes `g1`
+    /// and resolves to other versions.
+    known_difference_seed4242_case0250: "seed4242-case0250",
+        bundler: Some(&["g0 (3.0.pre)", "g1 (1.0)", "g2 (2.0)", "g3 (3.0)"]),
+        spinel: Some(&["g0 (2.0)", "g1 (2.0.a)", "g2 (2.0)", "g3 (1.0)"]);
+    /// Both resolve after relaxing `g4`; Spinel also relaxes `g1` and `g3`
+    /// and resolves to other versions.
+    known_difference_seed4242_case0536: "seed4242-case0536",
+        bundler: Some(&["g0 (1.1)", "g1 (2.0)", "g3 (1.0)", "g4 (2.0.a)"]),
+        spinel: Some(&["g0 (1.1)", "g1 (2.0)", "g3 (2.0.a)", "g4 (2.0)"]);
+    /// Both resolve after relaxing `g2`; Spinel also relaxes `g0` and `g3`
+    /// and resolves to other versions.
+    known_difference_seed4242_case0872: "seed4242-case0872",
+        bundler: Some(&["g0 (1.1)", "g2 (2.0.beta)", "g3 (1.1)", "g4 (2.0)"]),
+        spinel: Some(&["g0 (2.0)", "g1 (1.1)", "g2 (3.0)", "g3 (2.1.rc1)", "g4 (2.0)"]);
+    /// Bundler's first try fails and it resolves after relaxing `g2`;
+    /// Spinel's first try resolves, to other versions.
+    known_difference_seed4242_case0924: "seed4242-case0924",
+        bundler: Some(&["g0 (2.0)", "g1 (3.0)", "g2 (2.0.beta)", "g3 (1.0)"]),
+        spinel: Some(&["g0 (1.1)", "g2 (3.0)", "g3 (1.0)"]);
 }
 
 #[test]
