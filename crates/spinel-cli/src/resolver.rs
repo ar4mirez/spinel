@@ -42,6 +42,11 @@
 //! A conflict is explained as Bundler explains it: pubgrub-ruby's
 //! `FailureWriter`, ported in `resolver/report.rs`.
 //!
+//! **The pubgrub-ruby port** (#816) replaces the `pubgrub` crate in slices:
+//! `resolver/solver/` is pubgrub-ruby's solver, and `resolver/source.rs`
+//! Bundler's side of it over the same candidates. [`Solver::PubgrubRuby`]
+//! resolves with them, for `spinel resolve --solver pubgrub-ruby` only.
+//!
 //! `bundler` has one candidate, the Bundler version the lockfile is written
 //! for (`lockfile::BUNDLER_VERSION`), as Bundler's `Source::Metadata` gives
 //! it only the version running; no index is read for it, and no resolution
@@ -65,12 +70,13 @@
 //! Not here yet: a rubygems source scoped to a gem.
 
 mod report;
-// ponytail: the pubgrub-ruby port (#816) is built and tested but not yet
-// resolved with, so most of it is unused outside its tests. Slice 2 of #816
-// wires it in behind `spinel resolve --solver pubgrub-ruby`; drop this
-// `allow` then.
-#[allow(dead_code, unused_imports)]
+// ponytail: what reads the solver's derivations (a cause's parts, the custom
+// explanations, `conflict?`) arrives with slices 3 and 4 of #816
+// (`find_names_to_relax`, `FailureWriter`), and some of what its tests use
+// nothing else does yet; drop this `allow` with slice 4.
+#[allow(dead_code)]
 mod solver;
+mod source;
 
 use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
@@ -422,6 +428,13 @@ impl Package {
             self,
             Package::Name(PackageName::Ruby | PackageName::RubyGems)
         )
+    }
+}
+
+/// `Package.root?`, for pubgrub-ruby's solver.
+impl solver::Package for Package {
+    fn is_root(&self) -> bool {
+        matches!(self, Package::Root(_))
     }
 }
 
@@ -779,6 +792,8 @@ struct Provider<'a> {
     specs: RefCell<HashMap<String, std::rc::Rc<Vec<Spec>>>>,
     packages: RefCell<HashMap<PackageName, PackageState>>,
     root_dependencies: Vec<(Package, VersionSet)>,
+    /// `root_dependencies` as pubgrub-ruby's ranges, for [`Solver::PubgrubRuby`].
+    root_constraints: Vec<(Package, solver::RangeSet<Candidate>)>,
     /// When each package was first depended on, as pubgrub-ruby's partial
     /// solution orders the packages it has yet to decide: propagation walks
     /// a package's incompatibilities last first, so of one version's
@@ -800,6 +815,7 @@ impl<'a> Provider<'a> {
             specs: RefCell::new(HashMap::new()),
             packages: RefCell::new(HashMap::new()),
             root_dependencies: Vec::new(),
+            root_constraints: Vec::new(),
             seen: RefCell::new(HashMap::new()),
         };
         for name in relaxed {
@@ -1133,6 +1149,21 @@ impl<'a> Provider<'a> {
         out
     }
 
+    /// [`Provider::dependency_hash`] as pubgrub-ruby's ranges.
+    fn constraint_hash(
+        deps: impl IntoIterator<Item = (PackageName, solver::RangeSet<Candidate>)>,
+    ) -> Vec<(Package, solver::RangeSet<Candidate>)> {
+        let mut out: Vec<(Package, solver::RangeSet<Candidate>)> = Vec::new();
+        for (name, range) in deps {
+            let package = Package::Name(name);
+            match out.iter_mut().find(|(p, _)| *p == package) {
+                Some((_, existing)) => *existing = existing.intersect(&range),
+                None => out.push((package, range)),
+            }
+        }
+        out
+    }
+
     /// `Resolver::Base#initialize` and `Resolver#prepare_dependencies`: the
     /// Gemfile's dependencies that apply on some resolution platform, each
     /// making its gem top-level, and the two meta dependencies. A Gemfile gem
@@ -1140,7 +1171,7 @@ impl<'a> Provider<'a> {
     /// prereleases, then reported as not found.
     fn prepare_root(&mut self) -> Result<(), Failure> {
         let request = self.request;
-        let mut deps: Vec<(PackageName, VersionSet)> = Vec::new();
+        let mut deps: Vec<(PackageName, Requirement)> = Vec::new();
         let mut gemfile_deps: HashMap<PackageName, &GemfileDependency> = HashMap::new();
         for dep in &request.dependencies {
             let platforms = dep.gem_platforms(&request.platforms);
@@ -1170,7 +1201,7 @@ impl<'a> Provider<'a> {
                 },
             );
             gemfile_deps.insert(name.clone(), dep);
-            deps.push((name, requirement_to_range(&dep.requirement)));
+            deps.push((name, dep.requirement.clone()));
         }
         for (meta, version) in [
             (PackageName::Ruby, &request.ruby_version),
@@ -1188,10 +1219,19 @@ impl<'a> Provider<'a> {
                     candidates: None,
                 },
             );
-            deps.push((meta, requirement_to_range(&exact)));
+            deps.push((meta, exact));
         }
+        let ranges = Provider::dependency_hash(
+            deps.iter()
+                .map(|(name, req)| (name.clone(), requirement_to_range(req))),
+        );
+        let constraints = Provider::constraint_hash(
+            deps.iter()
+                .map(|(name, req)| (name.clone(), solver::candidate_range(req))),
+        );
         let mut root = Vec::new();
-        for (package, range) in Provider::dependency_hash(deps) {
+        let mut root_constraints = Vec::new();
+        for ((package, range), constraint) in ranges.into_iter().zip(constraints) {
             let Package::Name(name) = &package else {
                 unreachable!("dependencies are never the root");
             };
@@ -1205,10 +1245,12 @@ impl<'a> Provider<'a> {
             }
             if !self.versions_for(name, &range).is_empty() {
                 root.push((package, range));
+                root_constraints.push(constraint);
                 continue;
             }
             let Some(dep) = gemfile_deps.get(name) else {
                 root.push((package, range));
+                root_constraints.push(constraint);
                 continue;
             };
             if !dep.current_platform() {
@@ -1217,6 +1259,7 @@ impl<'a> Provider<'a> {
             return Err(self.not_found(dep));
         }
         self.root_dependencies = root;
+        self.root_constraints = root_constraints;
         Ok(())
     }
 
@@ -1269,12 +1312,14 @@ impl<'a> Provider<'a> {
         Failure::NotFound(message)
     }
 
-    /// The dependencies of `candidate` of `name`, without any on itself.
-    fn candidate_dependencies(
+    /// The requirements of `candidate` of `name`, without any on itself
+    /// (`version.dependencies.reject {|d| d.name == package.name }`), sorted
+    /// by name.
+    fn candidate_requirements(
         &self,
         name: &PackageName,
         candidate: &Candidate,
-    ) -> Vec<(Package, VersionSet)> {
+    ) -> Vec<(PackageName, Requirement)> {
         let deps = self.with_candidates(name, |candidates, _| {
             candidates
                 .iter()
@@ -1282,11 +1327,32 @@ impl<'a> Provider<'a> {
                 .map(|(_, group)| group.dependencies.clone())
                 .unwrap_or_default()
         });
+        deps.into_iter().filter(|(dep, _)| dep != name).collect()
+    }
+
+    /// The dependencies of `candidate` of `name`, without any on itself.
+    fn candidate_dependencies(
+        &self,
+        name: &PackageName,
+        candidate: &Candidate,
+    ) -> Vec<(Package, VersionSet)> {
         Provider::dependency_hash(
-            deps.into_iter()
-                .filter(|(dep, _)| dep != name)
+            self.candidate_requirements(name, candidate)
+                .into_iter()
                 .map(|(dep, req)| (dep, requirement_to_range(&req))),
         )
+    }
+
+    /// `Package#platforms`: the resolution platforms, or a top-level
+    /// dependency's own.
+    fn package_platforms(&self, package: &Package) -> Vec<GemPlatform> {
+        match package {
+            Package::Root(_) => self.request.platforms.clone(),
+            Package::Name(name) => {
+                self.package_state(name);
+                self.packages.borrow()[name].platforms.clone()
+            }
+        }
     }
 
     /// The builds of a chosen candidate that install on each resolution
@@ -1552,33 +1618,66 @@ impl DependencyProvider for Provider<'_> {
     }
 }
 
+/// The solver a resolution runs on (#816).
+// ponytail: two solvers coexist while #816 ports pubgrub-ruby in slices;
+// slice 5 makes `PubgrubRuby` the only one and removes this switch, the
+// `--solver` flag of `spinel resolve`, and the `pubgrub` crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Solver {
+    /// The `pubgrub` crate, which `spinel install` resolves with.
+    #[default]
+    Pubgrub,
+    /// The port of the pubgrub-ruby Bundler 4.0.20 vendors
+    /// (`resolver/solver/`), fed by Bundler's source side
+    /// (`resolver/source.rs`). With no lockfile only, and no relaxation yet:
+    /// a failure is not retried.
+    PubgrubRuby,
+}
+
 /// Resolve `request` against `index`, as `Bundler::Resolver#start` does with
 /// no lockfile: the builds to install, in the lockfile's order (`full_name`),
 /// or why there are none.
 pub fn resolve(request: &Request, index: &Index) -> Result<Vec<Resolved>, Failure> {
-    solve(request, index, Locked::default(), |provider, solution| {
-        let mut resolved = Vec::new();
-        for (package, candidate) in solution {
-            let Package::Name(name @ PackageName::Gem(gem)) = &package else {
-                continue;
-            };
-            // `SpecSet#for` never materializes `bundler`, so neither the
-            // lockfile nor the install plan has it.
-            if gem == "bundler" {
-                continue;
-            }
-            for spec in provider.chosen_specs(name, &candidate) {
-                resolved.push(Resolved {
-                    name: spec.name,
-                    version: spec.version,
-                    platform: spec.platform,
-                });
-            }
+    resolve_with(request, index, Solver::Pubgrub)
+}
+
+/// [`resolve`], on the solver given.
+pub fn resolve_with(
+    request: &Request,
+    index: &Index,
+    solver: Solver,
+) -> Result<Vec<Resolved>, Failure> {
+    match solver {
+        Solver::Pubgrub => solve(request, index, Locked::default(), resolved_builds),
+        Solver::PubgrubRuby => {
+            solve_pubgrub_ruby(request, index, debug_resolver(), resolved_builds)
         }
-        // `LockfileGenerator`'s order: by `full_name`.
-        resolved.sort_by_cached_key(Resolved::full_name);
-        resolved
-    })
+    }
+}
+
+/// The builds of a resolution with no lockfile, in the lockfile's order.
+fn resolved_builds(provider: &Provider<'_>, solution: Vec<(Package, Candidate)>) -> Vec<Resolved> {
+    let mut resolved = Vec::new();
+    for (package, candidate) in solution {
+        let Package::Name(name @ PackageName::Gem(gem)) = &package else {
+            continue;
+        };
+        // `SpecSet#for` never materializes `bundler`, so neither the
+        // lockfile nor the install plan has it.
+        if gem == "bundler" {
+            continue;
+        }
+        for spec in provider.chosen_specs(name, &candidate) {
+            resolved.push(Resolved {
+                name: spec.name,
+                version: spec.version,
+                platform: spec.platform,
+            });
+        }
+    }
+    // `LockfileGenerator`'s order: by `full_name`.
+    resolved.sort_by_cached_key(Resolved::full_name);
+    resolved
 }
 
 /// Resolve `request` against `index` with a lockfile's hold on it (#79), as
@@ -1643,7 +1742,7 @@ fn solve<T>(
     request: &Request,
     index: &Index,
     mut locked: Locked,
-    finish: impl FnOnce(&Provider<'_>, pubgrub::SelectedDependencies<Package, Candidate>) -> T,
+    finish: impl FnOnce(&Provider<'_>, Vec<(Package, Candidate)>) -> T,
 ) -> Result<T, Failure> {
     // `Base#requirements`: the Gemfile's dependencies that apply on some
     // resolution platform, which `indirect_pins` leaves to the last.
@@ -1660,7 +1759,7 @@ fn solve<T>(
             let mut provider = Provider::new(request, index, &locked, &relaxed);
             provider.prepare_root()?;
             match pubgrub::resolve(&provider, root.clone(), root_candidate()) {
-                Ok(solution) => return Ok(finish(&provider, solution)),
+                Ok(solution) => return Ok(finish(&provider, solution.into_iter().collect())),
                 Err(PubGrubError::NoSolution(tree)) => {
                     let (unlock, prereleases) = provider.names_to_relax(&tree);
                     if unlock.is_empty() && prereleases.is_empty() {
@@ -1680,6 +1779,54 @@ fn solve<T>(
             locked.unlock_names(&unlock, &gemfile);
         }
         relaxed.extend(prereleases);
+    }
+}
+
+/// `Resolver#debug?`: with Bundler's `DEBUG_RESOLVER` or one of its other
+/// names set, a logger that prints every line pubgrub-ruby logs to standard
+/// error, as Bundler prints them.
+fn debug_resolver() -> Option<solver::Logger> {
+    let debug = [
+        "BUNDLER_DEBUG_RESOLVER",
+        "BUNDLER_DEBUG_RESOLVER_TREE",
+        "DEBUG_RESOLVER",
+        "DEBUG_RESOLVER_TREE",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some());
+    debug.then(|| Box::new(|_, line: &str| eprintln!("{line}")) as solver::Logger)
+}
+
+/// `Resolver#solve_versions` on pubgrub-ruby's solver, with no lockfile:
+/// its first try, a failure not yet relaxed and retried. `logger` gets
+/// every line pubgrub-ruby logs.
+fn solve_pubgrub_ruby<T>(
+    request: &Request,
+    index: &Index,
+    logger: Option<solver::Logger>,
+    finish: impl FnOnce(&Provider<'_>, Vec<(Package, Candidate)>) -> T,
+) -> Result<T, Failure> {
+    let locked = Locked::default();
+    let relaxed: HashSet<String> = HashSet::new();
+    let mut provider = Provider::new(request, index, &locked, &relaxed);
+    provider.prepare_root()?;
+    let root = Package::Root(request.gemfile.clone());
+    let mut version_solver = solver::VersionSolver::new(
+        source::BundlerSource::new(&provider),
+        root,
+        source::BundlerStrategy::default(),
+        logger,
+    );
+    match version_solver.solve() {
+        Ok(decisions) => Ok(finish(&provider, decisions)),
+        // ponytail: `find_names_to_relax` is slice 3 of #816; until then
+        // this path relaxes nothing, so a failure is final and only first
+        // tries compare with Bundler's. The explanation is the failing
+        // incompatibility alone until slice 4 ports `FailureWriter` over it.
+        Err(failure) => Err(Failure::Conflict(format!(
+            "Could not find compatible versions\n\n{}",
+            failure.incompatibility
+        ))),
     }
 }
 

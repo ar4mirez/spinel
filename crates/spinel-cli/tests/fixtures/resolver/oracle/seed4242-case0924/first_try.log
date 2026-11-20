@@ -1,0 +1,52 @@
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: Gemfile depends on g3 < 3
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g3 < 3
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g3 1.0
+selected g3 1.0
+attempting g0 2.0
+fact: g0 >= 2.0 depends on g1 >= 0
+fact: g0 >= 2.0 depends on g2 >= 0
+selected g0 2.0
+derived: g2 >= 0
+derived: g1 >= 0
+attempting g2 3.0
+selected g2 3.0
+attempting g1 3.0
+fact: g1 >= 3.0 depends on g2 >= 1.0, < 3
+conflict: true
+derived: not g1 >= 3.0
+attempting g1 1.0
+fact: g1 < 3.0 depends on g2 < 2
+conflict: true
+conflict: g1 < 3.0 depends on g2 < 2
+! g1 < 3.0 is satisfied by not g1 >= 3.0
+! which is caused by g1 >= 3.0 depends on g2 >= 1.0, < 3
+! thus g2 < 3 is required
+backtracking to 1
+fact: g2 < 3 is required
+derived: g2 < 3
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g3 1.0
+selected g3 1.0
+attempting g2
+fact: g2 < 3 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+conflict: g2 < 3 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+! g2 < 3 is satisfied by g2 < 3
+! which is caused by g2 < 3 is required
+! thus version solving has failed

@@ -81,6 +81,11 @@ fn setting(case: &Path, key: &str) -> String {
 /// Evaluate the case's Gemfile and resolve it; the source is spelled
 /// `@SOURCE@` in what comes back.
 fn resolve(name: &str, source: &str) -> Output {
+    resolve_with(name, source, &[])
+}
+
+/// [`resolve`], with more arguments to `spinel resolve`.
+fn resolve_with(name: &str, source: &str, args: &[&str]) -> Output {
     let case = fixtures().join("cases").join(name);
     let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shims/gemfile_eval.rb");
     let eval = Command::new(SPINEL)
@@ -102,7 +107,7 @@ fn resolve(name: &str, source: &str) -> Output {
         .join(name);
     let _ = fs::remove_dir_all(&home);
     let mut cmd = Command::new(SPINEL);
-    cmd.arg("resolve").arg("-");
+    cmd.arg("resolve").arg("-").args(args);
     for platform in setting(&case, "platforms").split_whitespace() {
         cmd.arg("--platform").arg(platform);
     }
@@ -147,8 +152,12 @@ fn bundler_explanation(name: &str) -> String {
 }
 
 fn assert_resolves_as_bundler(name: &str) {
+    assert_resolves_as_bundler_with(name, &[]);
+}
+
+fn assert_resolves_as_bundler_with(name: &str, args: &[&str]) {
     let source = serve_index();
-    let out = resolve(name, &source);
+    let out = resolve_with(name, &source, args);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -257,6 +266,64 @@ fn reports_a_gem_not_found_as_bundler_does() {
         explanation.replace("@SOURCE@/.", "@SOURCE@/\nor installed locally."),
         bundler
     );
+}
+
+/// The port of Bundler's pubgrub-ruby (#816), behind `--solver
+/// pubgrub-ruby` until it is the only solver, resolves every case that
+/// resolves as Bundler does: Bundler's first try decides each, so the
+/// retries the port does not make yet are not needed. Each case that does
+/// not resolve fails on it too; its explanation is not Bundler's yet.
+#[test]
+fn the_pubgrub_ruby_port_resolves_as_bundler_does() {
+    let port = ["--solver", "pubgrub-ruby"];
+    for name in [
+        "sinatra",
+        "old_ruby",
+        "backtrack",
+        "json_two_platforms",
+        "prerelease",
+        "no_prerelease",
+    ] {
+        assert_resolves_as_bundler_with(name, &port);
+    }
+    let source = serve_index();
+    for name in [
+        "conflict",
+        "conflict_ruby",
+        "conflict_three",
+        "conflict_transitive",
+    ] {
+        let out = resolve_with(name, &source, &port);
+        assert_eq!(out.status.code(), Some(1), "{name}: should not resolve");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("Could not find compatible versions\n"),
+            "{name}: {stderr}"
+        );
+    }
+    // A Gemfile gem nothing satisfies is reported before either solver runs.
+    let out = resolve_with("not_found", &source, &port);
+    let expected = fs::read_to_string(fixtures().join("cases/not_found/spinel.txt")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
+}
+
+/// The port takes no lockfile yet: `--locked` with it is refused.
+#[test]
+fn the_pubgrub_ruby_port_takes_no_lockfile_yet() {
+    let out = Command::new(SPINEL)
+        .args([
+            "resolve",
+            "-",
+            "--solver",
+            "pubgrub-ruby",
+            "--locked",
+            "Gemfile.lock",
+        ])
+        .output()
+        .expect("spinel runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
 }
 
 /// Every case is one of the above.

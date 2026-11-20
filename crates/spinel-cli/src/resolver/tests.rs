@@ -373,6 +373,148 @@ known_differences! {
         spinel: Some(&["g0 (1.1)", "g2 (3.0)", "g3 (1.0)"]);
 }
 
+// The port of pubgrub-ruby (#816), fed by Bundler's source side
+// (`resolver/source.rs`), behind `Solver::PubgrubRuby`.
+
+/// What `Solver::PubgrubRuby` resolves `r` to, and every line pubgrub-ruby
+/// logged on the way, as `DEBUG_RESOLVER` makes Bundler print them.
+fn pubgrub_ruby_log(r: &Request, gems: &Index) -> (Result<Vec<String>, Failure>, Vec<String>) {
+    let lines = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let sink = lines.clone();
+    let logger: solver::Logger =
+        Box::new(move |_, line: &str| sink.borrow_mut().push(line.to_owned()));
+    let result = solve_pubgrub_ruby(r, gems, Some(logger), resolved_builds)
+        .map(|specs| specs.iter().map(ToString::to_string).collect());
+    let lines = lines.borrow().clone();
+    (result, lines)
+}
+
+/// On every case in `tests/fixtures/resolver/oracle/`, the port logs what
+/// Bundler 4.0.20 logged on its first try, line for line: the facts it
+/// learned, each decision and derivation, each conflict and how it was
+/// resolved (`first_try.log`, recorded with `decision_log.py --write`; a
+/// line's trailing space, after `attempting` a gem with no version left, is
+/// not kept). Bundler's retries after `find_names_to_relax` are not
+/// compared: the port relaxes nothing yet.
+#[test]
+fn the_pubgrub_ruby_port_decides_as_bundler_does_on_the_first_try() {
+    let oracle =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resolver/oracle");
+    let mut cases: Vec<String> = std::fs::read_dir(&oracle)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    cases.sort();
+    assert_eq!(cases.len(), 15, "{cases:?}");
+    for case in cases {
+        let (mut r, gems) = oracle_case(&case);
+        // As `decision_log.py` spells Bundler's source.
+        r.source = "rubygems repository @SOURCE@".to_owned();
+        let (_, ours) = pubgrub_ruby_log(&r, &gems);
+        let bundler = std::fs::read_to_string(oracle.join(&case).join("first_try.log")).unwrap();
+        let ours: Vec<&str> = ours.iter().map(|line| line.trim_end()).collect();
+        let bundler: Vec<&str> = bundler.lines().collect();
+        assert_eq!(ours, bundler, "{case}: not Bundler's first try");
+    }
+}
+
+#[test]
+fn the_pubgrub_ruby_port_resolves_as_the_pubgrub_crate_does_where_bundler_needs_no_retry() {
+    let platforms = ["x86_64-linux"];
+    let gems = index(&[
+        ("app", "1.0 lib:~> 1.0\n2.0 lib:~> 2.0\n"),
+        ("lib", "1.0\n1.5\n2.0\n2.1\n"),
+        (
+            "old",
+            "1.0 |ruby:>= 2.0\n2.0 |ruby:>= 3.4\n3.0 |rubygems:>= 9\n",
+        ),
+        ("pre", "1.0\n2.0.beta\n"),
+        ("same", "1.0\n1.0-java\n"),
+        ("differs", "1.0\n1.0-java jruby-only:>= 0\n"),
+        ("jruby-only", "1.0\n"),
+    ]);
+    for (deps, platforms, ruby) in [
+        (vec![dep("app", &[])], &platforms[..], "4.0.0"),
+        (
+            vec![dep("app", &[]), dep("lib", &["< 2"])],
+            &platforms,
+            "4.0.0",
+        ),
+        (vec![dep("old", &[])], &platforms, "3.3.0"),
+        (vec![dep("old", &[])], &platforms, "4.0.0"),
+        (vec![dep("pre", &[])], &platforms, "4.0.0"),
+        (vec![dep("pre", &[">= 2.0.a"])], &platforms, "4.0.0"),
+        (
+            vec![dep("same", &[]), dep("differs", &[])],
+            &["x86_64-linux", "java"],
+            "4.0.0",
+        ),
+    ] {
+        let r = request(deps, platforms, ruby);
+        let (ours, _) = pubgrub_ruby_log(&r, &gems);
+        assert_eq!(ours.unwrap(), resolved(&r, &gems));
+    }
+}
+
+/// `Resolver#incompatibilities_for`: a dependency is stated for the run of
+/// versions that share it, open below when the run reaches the first
+/// version and above when it reaches the last.
+#[test]
+fn the_pubgrub_ruby_port_states_a_dependency_for_the_versions_that_share_it() {
+    let gems = index(&[
+        (
+            "app",
+            "1.0 lib:~> 1.0\n2.0 lib:~> 2.0\n3.0 lib:~> 2.0\n4.0 lib:>= 3\n",
+        ),
+        ("lib", "1.0\n2.0\n3.0\n"),
+    ]);
+    let facts = |requirement: &[&str]| {
+        let r = request(vec![dep("app", requirement)], &["x86_64-linux"], "4.0.0");
+        let (_, log) = pubgrub_ruby_log(&r, &gems);
+        log.into_iter()
+            .filter(|line| line.starts_with("fact: app"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(facts(&[]), ["fact: app >= 4.0 depends on lib >= 3"]);
+    assert_eq!(
+        facts(&["< 4"]),
+        ["fact: app >= 2.0, < 4.0 depends on lib ~> 2.0"]
+    );
+    assert_eq!(facts(&["< 2"]), ["fact: app < 2.0 depends on lib ~> 1.0"]);
+}
+
+/// `Resolver#no_versions_incompatibility_for`: what has no version is
+/// worded as Bundler words it, naming the resolution platforms when the
+/// source has builds for others.
+#[test]
+fn the_pubgrub_ruby_port_explains_a_missing_version_as_bundler_does() {
+    let gems = index(&[
+        ("app", "1.0 lib:>= 9\n"),
+        ("native_app", "1.0 native:>= 1\n"),
+        ("native", "1.0-java\n"),
+        ("lib", "1.0\n"),
+    ]);
+    let fact = |gem: &str| {
+        let r = request(vec![dep(gem, &[])], &["x86_64-linux"], "4.0.0");
+        let (result, log) = pubgrub_ruby_log(&r, &gems);
+        assert!(matches!(result, Err(Failure::Conflict(_))), "{gem}");
+        log.into_iter()
+            .filter(|line| line.starts_with("fact: ") && line.contains("could not be found"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fact("app"),
+        ["fact: lib >= 9 could not be found in rubygems repository https://gems.example/"]
+    );
+    assert_eq!(
+        fact("native_app"),
+        [
+            "fact: native >= 1 could not be found in rubygems repository https://gems.example/ \
+          for any resolution platforms (x86_64-linux)"
+        ]
+    );
+}
+
 #[test]
 fn narrows_to_builds_whose_requirements_are_equal_as_rubygems_compares_them() {
     // As `Gem::Platform.sort_and_filter_best_platform_match` narrows them
