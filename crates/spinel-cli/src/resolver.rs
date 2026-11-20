@@ -28,9 +28,11 @@
 //!   requirement names one, or it has no other version. When a resolution
 //!   fails through a gem with prereleases left out, along the failure's
 //!   first causes as Bundler follows them, it is retried with them in.
-//!   Against Bundler 4.0.20 this matches on 399 of 400 random indexes and
-//!   on the hand cases in `tests/fixtures/resolver/oracle/`; the one that
-//!   does not, `case0138`, takes a prerelease Bundler leaves out (#816).
+//!   Against Bundler 4.0.20 this matches on the hand cases in
+//!   `tests/fixtures/resolver/oracle/` and on 399 of 400, 993 of 1000 and
+//!   996 of 1000 random indexes (seeds 1, 816 and 4242); the twelve that do
+//!   not, kept beside the hand cases and tested as known differences, mostly
+//!   take prereleases Bundler leaves out (#816).
 //! - **Order.** The next gem decided is the one with at most one candidate
 //!   left, then the one with the fewest candidates above the range asked
 //!   for, ties going to the one found first; its candidate is the newest,
