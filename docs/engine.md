@@ -198,7 +198,7 @@ The compiler cannot supply that chain — it knows `B` is one level deeper, but 
 
 Three things carry one, because a reference resolves where it was written: a frame carries the scope that pushed it, a `Method` carries the scope its `def` appeared in, and a `Proc` carries the scope it was created in as a sixth slot.
 
-A bare `X` searches the cref chain innermost-first (own tables only) **except its outermost node**, then the innermost scope's ancestors, then `Object` if that scope is a module. Skipping the outermost node is what makes an ancestor's constant beat a top-level one of the same name — the ancestor walk covers that node anyway, and covers it with its ancestors — and asking whether the scope is a *module* rather than whether its ancestors reached `Object` is what gives `BasicObject` and its subclasses an empty constant namespace. `A::X` is the ancestor walk alone, rooted at `A`, with no lexical scope and no `Object` fallback; Ruby removed that fallback in 2.5, so `Sub::TOP` for a top-level `TOP` is a `NameError`. `::X` is the ancestor walk rooted at `Object`. `private_constant` marks a name in one module's own table, and hides it from the `A::X` walk alone.
+A bare `X` searches the cref chain innermost-first (own tables only) **except its outermost node**, then the innermost scope's ancestors, then `Object` if that scope is a module. Skipping the outermost node is what makes an ancestor's constant beat a top-level one of the same name — the ancestor walk covers that node anyway, and covers it with its ancestors — and asking whether the scope is a *module* rather than whether its ancestors reached `Object` is what gives `BasicObject` and its subclasses an empty constant namespace. `A::X` is `A`'s own table and then the ancestor walk rooted at `A` — own table first, so a module prepended to `A` does not shadow `A`'s constant, as a prepend moves methods behind the module and not constants — with no lexical scope and no `Object` fallback; Ruby removed that fallback in 2.5, so `Sub::TOP` for a top-level `TOP` is a `NameError`. `::X` is the ancestor walk rooted at `Object`. `private_constant` marks a name in one module's own table, and hides it from the `A::X` walk alone.
 
 These rules are documented nowhere and read wrong from `variable.c`, so like the ancestor chain they are measured rather than believed: `crates/spinel-vm/tests/eval.txt` holds them and `scripts/eval-oracle.rb` re-measures them in CI.
 
@@ -461,8 +461,10 @@ on its first compile instead, and the parser records on each literal which it
 was. A constructor says them at its call, except `Regexp.new(regexp)`, whose
 pattern already did.
 
-A match runs under a step budget, and refuses with `Error::Budget` past it,
-unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
+A match runs under a step budget, five million steps and 64 more for each
+byte of the subject, so that a match walking a long subject once is answered
+while backtracking built to blow up still is not, and refuses with
+`Error::Budget` past it, unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
 `timeout:`. Then the deadline replaces the budget, as CRuby gives up only when
 its timeout runs out, and a match past it is `Regexp::TimeoutError`.
 

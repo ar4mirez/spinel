@@ -1,0 +1,1284 @@
+# frozen_string_literal: true
+
+require_relative "helper"
+require_relative "helpers/integration"
+
+require "puma/configuration"
+require "puma/runner"
+
+require "time"
+
+class TestIntegrationCluster < TestIntegration
+  parallelize_me!
+
+  def workers ; 2 ; end
+
+  def setup
+    skip_unless :fork
+    super
+  end
+
+  def teardown
+    return if skipped?
+    super
+  end
+
+  def test_hot_restart_does_not_drop_connections_threads
+    restart_does_not_drop_connections num_threads: 10, signal: :USR2
+  end
+
+  def test_hot_restart_does_not_drop_connections
+    restart_does_not_drop_connections num_threads: 1, signal: :USR2
+  end
+
+  def test_phased_restart_does_not_drop_connections_threads
+    restart_does_not_drop_connections num_threads: 10, signal: :USR1,
+      config: "preload_app! false"
+  end
+
+  def test_phased_restart_does_not_drop_connections
+    restart_does_not_drop_connections num_threads: 1, signal: :USR1,
+      config: "preload_app! false"
+  end
+
+  def test_phased_restart_does_not_drop_connections_threads_fork_worker
+    restart_does_not_drop_connections num_threads: 10, signal: :USR1,
+      config: "fork_worker; preload_app! false"
+  end
+
+  def test_phased_restart_does_not_drop_connections_threads_mold_worker
+    restart_does_not_drop_connections num_threads: 10, signal: :USR1,
+      config: "mold_worker; preload_app! false"
+  end
+
+  def test_phased_restart_does_not_drop_connections_unix
+    restart_does_not_drop_connections num_threads: 1, signal: :USR1, unix: true,
+      config: "preload_app! false"
+  end
+
+  def test_pre_existing_unix
+    skip_unless :unix
+
+    File.binwrite bind_path, 'pre existing'
+
+    cli_server "-w #{workers} -q test/rackup/sleep_step.ru", unix: :unix
+
+    stop_server
+
+    assert File.exist?(@bind_path), 'Unix socket file should exist'
+
+  ensure
+    if UNIX_SKT_EXIST
+      File.unlink @bind_path if File.exist? @bind_path
+    end
+  end
+
+  def test_pre_existing_unix_stop_after_restart
+    skip_unless :unix
+
+    File.binwrite bind_path, 'pre existing'
+
+    cli_server "-w #{workers} -q test/rackup/sleep_step.ru", unix: :unix, config: "preload_app! false"
+    assert_equal "Slept 0.0 0", read_body(connect(nil, unix: true))
+
+    Process.kill :USR2, @pid
+    wait_for_server_to_include 'Restarting'
+    wait_for_server_to_boot
+
+    assert_equal "Slept 0.0 0", read_body(connect(nil, unix: true))
+    stop_server
+
+    assert File.exist?(@bind_path)
+
+  ensure
+    if UNIX_SKT_EXIST
+      File.unlink @bind_path if File.exist? @bind_path
+    end
+  end
+
+  # uses `:PWR` for linux, `:INFO` for mac
+  def test_thread_log
+    thread_log
+  end
+
+  def test_usr2_restart
+    _, new_reply = restart_server_and_listen("-q -w #{workers} test/rackup/hello.ru")
+    assert_equal "Hello World", new_reply
+  end
+
+  # Next two tests, one tcp, one unix
+  # Send requests 10 per second.  Send 10, then :TERM server, then send another 30.
+  # No more than 10 should throw Errno::ECONNRESET.
+
+  def test_term_closes_listeners_tcp
+    term_closes_listeners unix: false
+  end
+
+  def test_term_closes_listeners_unix
+    term_closes_listeners unix: true
+  end
+
+  def test_term_exit_code
+    cli_server "-w #{workers} test/rackup/hello.ru"
+    _, status = stop_server
+
+    assert_equal 15, status
+  end
+
+  def test_term_suppress
+    cli_server "-w #{workers} -C test/config/suppress_exception.rb test/rackup/hello.ru"
+
+    _, status = stop_server
+
+    assert_equal 0, status
+  end
+
+  def test_after_booted_and_after_stopped
+    skip_unless_signal_exist? :TERM
+    cli_server "-w #{workers} " \
+      "-C test/config/event_after_booted_and_after_stopped.rb " \
+      "-C test/config/event_after_booted_exit.rb " \
+      "test/rackup/hello.ru",
+      no_wait: true
+
+    # below is logged after workers boot
+    assert wait_for_server_to_include('after_booted called')
+    assert wait_for_server_to_include('Goodbye!')
+    # below logged after workers are stopped
+    assert wait_for_server_to_include('after_stopped called', timeout: STOP_TIMEOUT)
+    wait_server 15
+  end
+
+  def test_int_runs_after_stopped_before_waiting_for_hook_owned_child
+    skip_unless_signal_exist? :INT
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      after_booted do
+        $helper = Process.spawn('sleep', '300', pgroup: true)
+        puts 'helper started'
+      end
+
+      after_stopped do
+        Process.kill(:TERM, $helper)
+        Process.wait($helper)
+        puts 'helper reaped'
+      end
+    CONFIG
+
+    wait_for_server_to_include 'helper started'
+    _, status = stop_server signal: :INT
+
+    assert_equal 0, status.exitstatus
+    assert_includes @server_log + @server_line_buffer + @server.read, 'helper reaped'
+  end
+
+  def test_term_worker_clean_exit
+    cli_server "-w #{workers} test/rackup/hello.ru"
+
+    # Get the PIDs of the child workers.
+    worker_pids = get_worker_pids
+
+    # Signal the workers to terminate, and wait for them to die.
+    Process.kill :TERM, @pid
+    wait_server 15
+
+    zombies = bad_exit_pids worker_pids
+
+    assert_empty zombies, "Process ids #{zombies} became zombies"
+  end
+
+  def test_wakeup_does_not_block_when_pipe_is_full
+    r, w = IO.pipe
+
+    begin
+      loop { w.write_nonblock("x" * 512) }
+    rescue IO::EAGAINWaitWritable
+    end
+
+    runner = Puma::Runner.allocate
+    runner.instance_variable_set(:@wakeup, w)
+
+    t = Thread.new { runner.wakeup! }
+    assert t.join(2.0), "wakeup! deadlocked — blocked >2s on a full pipe"
+  ensure
+    t&.kill
+    r&.close
+    w&.close
+  end
+
+  # mimicking stuck workers, test respawn with external TERM
+  def test_stuck_external_term_spawn
+    worker_respawn(0) do |phase0_worker_pids|
+      last = phase0_worker_pids.last
+      # test is tricky if only one worker is TERM'd, so kill all but
+      # spread out, so all aren't killed at once
+      phase0_worker_pids.each do |pid|
+        Process.kill :TERM, pid
+        sleep 4 unless pid == last
+      end
+    end
+  end
+
+  # From Ruby 2.6 to 3.2, `Process.detach` can delay or prevent
+  # `Process.wait2(-1)` from detecting a terminated child:
+  # https://bugs.ruby-lang.org/issues/19837. However,
+  # `Process.wait2(<child pid>)` still works properly. This bug has
+  # been fixed in Ruby 3.3.
+  def test_workers_respawn_with_process_detach
+    config = 'test/config/process_detach_before_fork.rb'
+
+    worker_respawn(0, workers, config) do |phase0_worker_pids|
+      phase0_worker_pids.each do |pid|
+        Process.kill :KILL, pid
+      end
+    end
+
+    # `test/config/process_detach_before_fork.rb` forks and detaches a
+    # process.  Since MiniTest attempts to join all threads before
+    # finishing, terminate the process so that the test can end quickly
+    # if it passes.
+    pid_filename = File.join(Dir.tmpdir, 'process_detach_test.pid')
+    if File.exist?(pid_filename)
+      pid = File.read(pid_filename).chomp.to_i
+      File.unlink(pid_filename)
+      Process.kill :TERM, pid if pid > 0
+    end
+  end
+
+  # mimicking stuck workers, test restart
+  def test_stuck_phased_restart
+    worker_respawn { |phase0_worker_pids| Process.kill :USR1, @pid }
+  end
+
+  def test_puma_stats_clustered
+    worker_check_interval = 2
+
+    cli_server "-w 1 -t 1:1 #{set_pumactl_args unix: true} test/rackup/hello.ru",
+      config: "worker_check_interval #{worker_check_interval}"
+
+    sleep worker_check_interval + 1
+
+    stats = get_stats
+
+    assert_instance_of Hash, stats
+
+    last_status = stats['worker_status'].first['last_status']
+
+    Puma::Server::STAT_METHODS.each do |stat|
+      assert_includes last_status, stat.to_s
+    end
+  end
+
+  def test_worker_check_interval
+    # iso8601 2022-12-14T00:05:49Z
+    re_8601 = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
+    worker_check_interval = 1
+
+    cli_server "-w 1 -t 1:1 #{set_pumactl_args} test/rackup/hello.ru", config: "worker_check_interval #{worker_check_interval}"
+
+    sleep worker_check_interval + 1
+    checkin_1 = get_stats["worker_status"].first["last_checkin"]
+    assert_match re_8601, checkin_1
+
+    sleep worker_check_interval + 1
+    checkin_2 = get_stats["worker_status"].first["last_checkin"]
+    assert_match re_8601, checkin_2
+
+    # iso8601 sorts as a string
+    assert_operator(checkin_2, :>, checkin_1)
+  end
+
+  def test_worker_boot_timeout
+    timeout = 1
+    worker_timeout(timeout, 2, "failed to boot within \\\d+ seconds", "worker_boot_timeout #{timeout}; before_worker_boot { sleep #{timeout + 1} }")
+  end
+
+  def test_worker_timeout
+    skip 'Thread#name not available' unless Thread.current.respond_to?(:name)
+
+    timeout = Puma::Configuration::DEFAULTS[:worker_check_interval] + 1
+    config = <<~CONFIG
+      worker_timeout #{timeout}
+      before_worker_boot do
+        Thread.new do
+          sleep 1
+          Thread.list.find {|t| t.name == 'puma stat pld'}.kill
+        end
+      end
+    CONFIG
+
+    worker_timeout(timeout, 1, "failed to check in within \\\d+ seconds", config)
+  end
+
+  def test_idle_timeout
+    cli_server "-w #{workers} test/rackup/hello.ru", config: "idle_timeout 1"
+
+    get_worker_pids # wait for workers to boot
+
+    10.times {
+      connection = connect
+      assert_equal "Hello World", read_body(connection)
+      connection.close
+      sleep 0.5
+    }
+
+    assert wait_for_server_to_include '- All workers reached idle timeout'
+    wait_server
+
+    assert_raises Errno::ECONNREFUSED, "Connection refused" do
+      connect
+    end
+  end
+
+  def test_queue_requests_disabled
+    cli_server "-w #{workers} test/rackup/hello.ru", config: "queue_requests false"
+
+    get_worker_pids # wait for workers to boot
+
+    fast_connect
+    assert true
+  end
+
+  def test_queue_requests_disabled_does_not_pin_new_requests_to_busy_worker
+    cli_server "-w #{workers} -t 1:1 test/rackup/sleep_pid.ru", config: "queue_requests false"
+
+    get_worker_pids # wait for workers to boot
+
+    slow = Thread.new { read_body(fast_connect("sleep2"), 5).split.last.to_i }
+    sleep 0.5
+
+    mutex = Mutex.new
+    fast_pids = []
+    Array.new(8) do
+      Thread.new do
+        pid = read_body(fast_connect("sleep0"), 3).split.last.to_i
+        mutex.synchronize { fast_pids << pid }
+      end
+    end.each(&:join)
+
+    assert_equal 1, fast_pids.uniq.size
+    refute_equal slow.value, fast_pids.first
+  end
+
+  def test_worker_index_is_with_in_options_limit
+    cli_server "-C test/config/t3_conf.rb test/rackup/hello.ru"
+
+    get_worker_pids(0, 3) # this will wait till all the processes are up
+
+    worker_pid_was_present = File.file? "t3-worker-2-pid"
+
+    stop_server(Integer(File.read("t3-worker-2-pid")))
+
+    worker_index_within_number_of_workers = !File.file?("t3-worker-3-pid")
+
+    stop_server(Integer(File.read("t3-pid")))
+
+    assert(worker_pid_was_present)
+    assert(worker_index_within_number_of_workers)
+  ensure
+    File.unlink "t3-pid" if File.file? "t3-pid"
+    File.unlink "t3-worker-0-pid" if File.file? "t3-worker-0-pid"
+    File.unlink "t3-worker-1-pid" if File.file? "t3-worker-1-pid"
+    File.unlink "t3-worker-2-pid" if File.file? "t3-worker-2-pid"
+    File.unlink "t3-worker-3-pid" if File.file? "t3-worker-3-pid"
+  end
+
+  # use three workers to keep accepting clients
+  def test_fork_worker_before_refork
+    refork = Tempfile.new 'refork'
+    wrkrs = 3
+    cli_server "-w #{wrkrs} test/rackup/hello_with_delay.ru", config: <<~CONFIG
+      fork_worker 20
+      before_refork { File.write '#{refork.path}', 'Reforked' }
+    CONFIG
+
+    pids = get_worker_pids 0, wrkrs
+
+    socks = []
+    until refork.read == 'Reforked'
+      socks << fast_connect
+      sleep 0.004
+    end
+
+    100.times {
+      socks << fast_connect
+      sleep 0.004
+    }
+
+    socks.each { |s| read_body s }
+
+    refute_includes pids, get_worker_pids(1, wrkrs - 1)
+  end
+
+  # use three workers to keep accepting clients
+  def test_fork_worker_after_refork
+    refork = Tempfile.new 'refork2'
+    wrkrs = 3
+    cli_server "-w #{wrkrs} test/rackup/hello_with_delay.ru", config: <<~RUBY
+      fork_worker 20
+      before_refork { File.write '#{refork.path}', 'Before refork', mode: 'a+' }
+      after_refork { File.write '#{refork.path}', '-After refork', mode: 'a+' }
+    RUBY
+
+    pids = get_worker_pids 0, wrkrs
+
+    socks = []
+    until refork.read == 'Before refork-After refork'
+      refork.rewind
+      socks << fast_connect
+      sleep 0.004
+    end
+
+    100.times {
+      socks << fast_connect
+      sleep 0.004
+    }
+
+    socks.each { |s| read_body s }
+
+    refute_includes pids, get_worker_pids(1, wrkrs - 1)
+  end
+
+  def test_mold_worker_reforks_at_each_threshold
+    wrkrs = 3
+    cli_server "-w #{wrkrs} test/rackup/hello.ru", config: <<~CONFIG
+      worker_check_interval 1
+      mold_worker 10, 20
+      after_mold_promotion { puts "after_mold_promotion" }
+      before_mold_shutdown { puts "before_mold_shutdown" }
+    CONFIG
+
+    get_worker_pids 0, wrkrs
+    phase1_pids = send_requests_until_phase 1, wrkrs
+    phase2_pids = send_requests_until_phase 2, wrkrs
+    wait_for_server_to_include "before_mold_shutdown"
+
+    assert_empty phase1_pids & phase2_pids
+    assert_equal %w[after_mold_promotion after_mold_promotion before_mold_shutdown],
+      @server_log.scan(/after_mold_promotion|before_mold_shutdown/)
+  end
+
+  def test_mold_worker_refork_replaces_workers_forked_by_previous_mold
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      worker_check_interval 30
+      mold_worker 1_000_000
+    CONFIG
+
+    get_worker_pids 0
+    Process.kill :URG, @pid
+    phase1_pids = get_worker_pids 1
+    Process.kill :URG, @pid
+
+    assert_empty phase1_pids & get_worker_pids(2)
+  end
+
+  def test_mold_worker_refork_does_not_trigger_idle_timeout
+    cli_server "-w 1 test/rackup/hello.ru", config: <<~CONFIG
+      idle_timeout 30
+      mold_worker 1_000_000
+    CONFIG
+
+    get_worker_pids 0, 1
+    Process.kill :URG, @pid
+    get_worker_pids 1, 1
+
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_promotion_does_not_trigger_idle_timeout
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      idle_timeout 1
+      mold_worker 1_000_000
+      after_mold_promotion { sleep 2 }
+    CONFIG
+
+    get_worker_pids 0
+    Process.kill :URG, @pid
+    get_worker_pids 1
+
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_refork_does_not_leak_file_descriptors
+    cli_server "-w 1", config: <<~CONFIG
+      mold_worker 1_000_000
+      app { |_| [200, {}, [Dir.children('/dev/fd').size.to_s]] }
+    CONFIG
+
+    get_worker_pids 0, 1
+    descriptors = read_body(connect).to_i
+
+    3.times do |phase|
+      Process.kill :URG, @pid
+      get_worker_pids phase + 1, 1
+
+      assert_equal descriptors, read_body(connect).to_i
+    end
+  end
+
+  def test_mold_worker_ignores_mold_requests_for_threshold
+    cli_server "-w #{workers} -t 1:1 test/rackup/hello.ru", config: <<~CONFIG
+      worker_check_interval 0.5
+      mold_worker 10, 11
+    CONFIG
+
+    get_worker_pids 0
+    send_requests_until_phase 1
+
+    assert_raises(Minitest::Assertion) { wait_for_server_to_include "phase: 2", timeout: 3 }
+  end
+
+  def test_mold_worker_replaces_workers_after_mold_dies
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      worker_check_interval 1
+      mold_worker 10
+    CONFIG
+
+    get_worker_pids 0
+    phase1_pids = send_requests_until_phase 1
+
+    Process.kill :KILL, promoted_mold_pid
+    Process.kill :KILL, phase1_pids.first
+
+    get_worker_pids 1, 1
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_replaces_pending_workers_after_mold_dies
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      master = Process.pid
+      mold_worker 1_000_000
+      before_worker_fork do
+        if Process.pid != master
+          puts "mold about to fork"
+          sleep
+        end
+      end
+    CONFIG
+
+    get_worker_pids 0
+    Process.kill :URG, @pid
+    wait_for_server_to_include "mold about to fork"
+    Process.kill :KILL, promoted_mold_pid
+    get_worker_pids 1
+
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_refork_waits_for_all_workers_after_worker_dies
+    boot_gate = tmp_path
+    cli_server "-w 3 test/rackup/hello.ru", config: <<~CONFIG
+      master = Process.pid
+      mold_worker 1_000_000
+      after_booted { puts "cluster ready" }
+      before_worker_boot do |index|
+        if Process.ppid != master && index == 1
+          puts "waiting for boot gate"
+          sleep 0.01 until File.exist? '#{boot_gate}'
+        end
+      end
+    CONFIG
+
+    get_worker_pids 0, 3
+    wait_for_server_to_include "cluster ready"
+    Process.kill :URG, @pid
+    first_worker = get_worker_pids(1, 1).first
+    wait_for_server_to_include "waiting for boot gate"
+    Process.kill :KILL, first_worker
+    get_worker_pids 1, 1
+    File.write boot_gate, ''
+    wait_for_server_to_include "cluster ready"
+
+    assert_equal 4, @server_log.scan(/booted in [.0-9]+s, phase: 1/).size
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_refork_completes_after_mold_dies_during_promotion
+    cli_server "-w 1 test/rackup/hello.ru", config: <<~CONFIG
+      mold_worker 1_000_000
+      after_mold_promotion { sleep 2 }
+    CONFIG
+
+    get_worker_pids 0, 1
+    Process.kill :URG, @pid
+    wait_for_server_to_include "to mold"
+    Process.kill :KILL, promoted_mold_pid
+
+    get_worker_pids 1, 1
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_mold_worker_exits_cleanly_when_master_dies
+    cli_server "-w 1 test/rackup/hello.ru", merge_err: true, config: "mold_worker 1_000_000"
+
+    get_worker_pids 0, 1
+    Process.kill :URG, @pid
+    get_worker_pids 1, 1
+    stop_server signal: :KILL
+
+    refute_includes "#{@server_line_buffer}#{@server.read}", "EOFError"
+  end
+
+  def test_mold_worker_phased_restart_retires_mold
+    cli_server "-w #{workers} test/rackup/hello.ru", config: <<~CONFIG
+      worker_check_interval 1
+      preload_app! false
+      mold_worker 10
+    CONFIG
+
+    get_worker_pids 0
+    send_requests_until_phase 1
+    mold_pid = promoted_mold_pid
+
+    Process.kill :USR1, @pid
+
+    get_worker_pids 2
+    assert_raises(Errno::ESRCH) { 20.times { Process.kill(0, mold_pid); sleep 0.1 } }
+  end
+
+  def test_fork_worker_spawn
+    cli_server '', config: <<~CONFIG
+      workers 1
+      fork_worker 0
+      app do |_|
+        pid = spawn('ls', [:out, :err]=>'/dev/null')
+        sleep 0.01
+        exitstatus = Process.detach(pid).value.exitstatus
+        [200, {}, [exitstatus.to_s]]
+      end
+    CONFIG
+    assert_equal '0', read_body(connect)
+  end
+
+  def test_fork_worker_replaces_worker_zero_without_losing_pending_forks
+    paused = tmp_path
+    cli_server "-w 4 test/rackup/hello.ru", no_wait: true, config: <<~CONFIG
+      master = Process.pid
+      fork_worker 0
+      after_worker_fork do |index|
+        if Process.pid != master && index == 1 && !File.exist?('#{paused}')
+          File.write '#{paused}', ''
+          puts "Fork paused in \#{Process.pid}"
+          sleep
+        end
+      end
+    CONFIG
+
+    worker_zero = wait_for_server_to_match(/Fork paused in (\d+)/, 1).to_i
+    Process.kill :KILL, worker_zero
+
+    wait_for_server_to_match(/Worker 0 \(PID: (?!#{worker_zero}\))\d+\) booted/)
+    [1, 2, 3].each do |index|
+      booted = /Worker #{index} \(PID: \d+\) booted/
+      wait_for_server_to_match(booted) unless @server_log.match?(booted)
+    end
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_fork_worker_phased_restart_does_not_wait_for_check_interval
+    cli_server "-w 3 test/rackup/hello.ru", config: <<~CONFIG
+      fork_worker 0
+      preload_app! false
+      worker_check_interval 30
+    CONFIG
+
+    get_worker_pids 0, 3
+    Process.kill :USR1, @pid
+
+    get_worker_pids 1, 3, timeout: 3
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_fork_worker_coalesces_pending_reforks
+    boot_gate = tmp_path
+    cli_server "-w 3 #{set_pumactl_args} test/rackup/hello.ru", config: <<~CONFIG
+      fork_worker 0
+      after_booted do
+        puts "cluster ready"
+        sleep 0.01 until File.exist? '#{boot_gate}'
+      end
+      after_refork { puts "refork complete" }
+    CONFIG
+
+    get_worker_pids 0, 3
+    wait_for_server_to_include "cluster ready"
+    2.times { cli_pumactl "refork" }
+    File.write boot_gate, ''
+    get_worker_pids 1, 2
+    wait_for_server_to_include "refork complete" unless @server_log.include? "refork complete"
+
+    assert_equal [1], get_stats['worker_status'].map { |w| w['phase'] }.uniq
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_fork_worker_refork_waits_for_all_workers_after_worker_dies
+    boot_gate = tmp_path
+    File.write boot_gate, ''
+    cli_server "-w 4 test/rackup/hello.ru", config: <<~CONFIG
+      master = Process.pid
+      fork_worker 0
+      after_booted { puts "cluster ready" }
+      before_worker_boot do |index|
+        if Process.ppid != master && index == 2
+          puts "waiting for boot gate"
+          sleep 0.01 until File.exist? '#{boot_gate}'
+        end
+      end
+    CONFIG
+
+    get_worker_pids 0, 4
+    wait_for_server_to_include "cluster ready"
+    File.unlink boot_gate
+    Process.kill :URG, @pid
+    first_worker = get_worker_pids(1, 1).first
+    wait_for_server_to_include "waiting for boot gate"
+    Process.kill :KILL, first_worker
+    get_worker_pids 1, 1
+    File.write boot_gate, ''
+    wait_for_server_to_include "cluster ready"
+
+    assert_equal 4, @server_log.scan(/booted in [.0-9]+s, phase: 1/).size
+    assert_equal "Hello World", read_body(connect)
+  end
+
+  def test_phased_restart_with_fork_worker_and_high_worker_count
+    worker_count = 10
+
+    cli_server "test/rackup/hello.ru", config: <<~CONFIG
+      fork_worker
+      worker_check_interval 1
+      # lower worker timeout from default (60) to avoid test timeout
+      worker_timeout 2
+      # to simulate worker 0 timeout, total boot time for all workers
+      # needs to exceed single worker timeout
+      workers #{worker_count}
+      preload_app! false
+    CONFIG
+
+    get_worker_pids 0, worker_count
+
+    Process.kill :USR1, @pid
+
+    get_worker_pids 1, worker_count
+
+    refute_includes @server_log, 'Terminating timed out worker.'
+  end
+
+  def test_refork_phased_restart_with_fork_worker_and_high_worker_count
+    worker_count = 10
+
+    cli_server "test/rackup/hello.ru", config: <<~CONFIG
+      fork_worker
+      worker_check_interval 1
+      # lower worker timeout from default (60) to avoid test timeout
+      worker_timeout 2
+      # to simulate worker 0 timeout, total boot time for all workers
+      # needs to exceed single worker timeout
+      workers #{worker_count}
+    CONFIG
+
+    get_worker_pids 0, worker_count
+
+    Process.kill :SIGURG, @pid
+
+    get_worker_pids 1, worker_count - 1, timeout: 15
+
+    refute @server_log[/.*Terminating timed out worker.*/]
+  end
+
+  def test_phased_restart_with_fork_worker_worker_order
+    worker_count = 3
+
+    cli_server "test/rackup/hello.ru", config: <<~CONFIG
+      fork_worker
+      worker_check_interval 1
+      # lower worker timeout from default (60) to avoid test timeout
+      worker_timeout 2
+      # to simulate worker 0 timeout, total boot time for all workers
+      # needs to exceed single worker timeout
+      workers #{worker_count}
+      preload_app! false
+    CONFIG
+
+    get_worker_pids 0, worker_count
+
+    worker_0_pid = @server_log[/Worker 0 \(PID: (\d+)\) booted/, 1].to_i
+    Process.kill :TERM, worker_0_pid
+
+    assert wait_for_server_to_match(/Worker 0 \(PID: \d+\) booted in [.0-9]+s, phase: 0/)
+
+    Process.kill :USR1, @pid
+
+    get_worker_pids 1, worker_count
+
+    phase_1_indexes = @server_log.scan(/Worker (\d+) \(PID: \d+\) booted in [.0-9]+s, phase: 1/).flatten.map(&:to_i)
+    assert_equal 0, phase_1_indexes.first
+
+    refute @server_log[/.*Terminating timed out worker.*/]
+  end
+
+  def test_prune_bundler_with_multiple_workers
+    cli_server "-C test/config/prune_bundler_with_multiple_workers.rb"
+    reply = read_body(connect)
+
+    assert_equal reply, "embedded app"
+  end
+
+  def test_prune_bundler_preserves_bundle_env_vars
+    cli_server "-w #{workers} --prune-bundler test/rackup/bundle_without.ru",
+      env: { 'BUNDLE_WITHOUT' => 'development:test' }
+
+    assert_equal 'development:test', read_body(connect)
+  end
+
+  def test_load_path_includes_extra_deps
+    cli_server "-w #{workers} -C test/config/prune_bundler_with_deps.rb test/rackup/hello.ru"
+
+    assert wait_for_server_to_match(/^LOAD_PATH: .+?\/gems\/minitest-[\d.]+\/lib$/)
+  end
+
+  def test_load_path_does_not_include_nio4r
+    cli_server "-w #{workers} -C test/config/prune_bundler_with_deps.rb test/rackup/hello.ru"
+
+    get_worker_pids # reads thru 'LOAD_PATH:' data
+
+    # make sure we're seeing LOAD_PATH: logging
+    assert_match(/^LOAD_PATH: .+\/gems\/minitest-[\d.]+\/lib$/, @server_log)
+    refute_match(%r{gems/nio4r-[\d.]+/lib$}, @server_log)
+  end
+
+  def test_json_gem_not_required_in_master_process
+    cli_server "-w #{workers} -C test/config/prune_bundler_print_json_defined.rb test/rackup/hello.ru"
+
+    assert wait_for_server_to_include('defined?(::JSON): nil')
+  end
+
+  def test_nio4r_gem_not_required_in_master_process
+    cli_server "-w #{workers} -C test/config/prune_bundler_print_nio_defined.rb test/rackup/hello.ru"
+
+    assert wait_for_server_to_include('defined?(::NIO): nil')
+  end
+
+  def test_nio4r_gem_not_required_in_master_process_when_using_control_server
+    cli_server "-w #{workers} #{set_pumactl_args} -C test/config/prune_bundler_print_nio_defined.rb test/rackup/hello.ru"
+
+    assert wait_for_server_to_include('Starting control server')
+
+    assert wait_for_server_to_include('defined?(::NIO): nil')
+  end
+
+  def test_application_is_loaded_exactly_once_if_using_preload_app
+    cli_server "-w #{workers} --preload test/rackup/write_to_stdout_on_boot.ru"
+
+    get_worker_pids
+    loading_app_count = @server_log.scan("Loading app").length
+    assert_equal 1, loading_app_count
+  end
+
+  def test_application_is_loaded_exactly_once_if_using_fork_worker
+    cli_server "-w #{workers} --fork-worker test/rackup/write_to_stdout_on_boot.ru"
+
+    get_worker_pids
+    loading_app_count = @server_log.scan("Loading app").length
+    assert_equal 1, loading_app_count # loaded in worker 0
+
+    @server_log.clear
+    Process.kill :SIGURG, @pid
+
+    get_worker_pids 1, workers - 1
+    loading_app_count = @server_log.scan("Loading app").length
+    assert_equal 0, loading_app_count
+  end
+
+  def test_application_is_loaded_exactly_once_if_using_preload_app_with_fork_worker
+    cli_server "-w #{workers} --preload --fork-worker test/rackup/write_to_stdout_on_boot.ru"
+
+    get_worker_pids
+    loading_app_count = @server_log.scan("Loading app").length
+    assert_equal 1, loading_app_count # loaded in master
+
+    @server_log.clear
+    Process.kill :SIGURG, @pid
+
+    get_worker_pids 1, workers - 1
+    loading_app_count = @server_log.scan("Loading app").length
+    assert_equal 0, loading_app_count
+  end
+
+  def test_warning_message_outputted_when_single_worker
+    cli_server "-w 1 test/rackup/hello.ru"
+
+    assert wait_for_server_to_include('Worker 0 (PID')
+    assert_match(/WARNING: Detected running cluster mode with 1 worker/, @server_log)
+  end
+
+  def test_warning_message_outputted_when_ruby_mn_threads_is_set
+    cli_server "-w 1 test/rackup/hello.ru", env: { 'RUBY_MN_THREADS' => '1' }
+
+    assert wait_for_server_to_include('Worker 0 (PID')
+    assert_includes @server_log, 'WARNING: Detected `RUBY_MN_THREADS'
+  end
+
+  def test_warning_message_not_outputted_when_single_worker_silenced
+    cli_server "-w 1 test/rackup/hello.ru", config: "silence_single_worker_warning"
+
+    assert wait_for_server_to_include('Worker 0 (PID')
+    refute_includes @server_log, 'WARNING: Detected running cluster mode with 1 worker'
+  end
+
+  def test_signal_ttin
+    cli_server "-w 2 test/rackup/hello.ru"
+    get_worker_pids # to consume server logs
+
+    Process.kill :TTIN, @pid
+
+    assert wait_for_server_to_match(/Worker 2 \(PID: \d+\) booted in/)
+  end
+
+  def test_signal_ttou
+    cli_server "-w 2 test/rackup/hello.ru"
+    get_worker_pids # to consume server logs
+
+    Process.kill :TTOU, @pid
+
+    assert wait_for_server_to_match(/Worker 1 \(PID: \d+\) terminating/)
+  end
+
+  def test_culling_strategy_youngest
+    cli_server "-w 2 test/rackup/hello.ru", config: "worker_culling_strategy :youngest"
+    get_worker_pids # to consume server logs
+
+    Process.kill :TTIN, @pid
+
+    assert wait_for_server_to_match(/Worker 2 \(PID: \d+\) booted in/)
+
+    Process.kill :TTOU, @pid
+
+    assert wait_for_server_to_match(/Worker 2 \(PID: \d+\) terminating/)
+  end
+
+  def test_culling_strategy_oldest
+    cli_server "-w 2 test/rackup/hello.ru", config: "worker_culling_strategy :oldest"
+    get_worker_pids # to consume server logs
+
+    Process.kill :TTIN, @pid
+
+    assert wait_for_server_to_match(/Worker 2 \(PID: \d+\) booted in/)
+
+    Process.kill :TTOU, @pid
+
+    assert wait_for_server_to_match(/Worker 0 \(PID: \d+\) terminating/)
+  end
+
+  def test_culling_strategy_oldest_fork_worker
+    cli_server "-w 2 test/rackup/hello.ru", config: <<~CONFIG
+      worker_culling_strategy :oldest
+      fork_worker
+    CONFIG
+
+    get_worker_pids # to consume server logs
+
+    Process.kill :TTIN, @pid
+
+    assert wait_for_server_to_match(/Worker 2 \(PID: \d+\) booted in/)
+
+    Process.kill :TTOU, @pid
+
+    assert wait_for_server_to_match(/Worker 1 \(PID: \d+\) terminating/)
+  end
+
+  def test_hook_data
+    cli_server "-C test/config/hook_data.rb test/rackup/hello.ru"
+    get_worker_pids 0, 2 # make sure workers are booted
+    stop_server
+
+    ary = Array.new(2) do |_index|
+      wait_for_server_to_match(/(index \d data \d)/, 1)
+    end.sort
+
+    assert_equal 'index 0 data 0', ary[0]
+    assert_equal 'index 1 data 1', ary[1]
+  end
+
+  def test_after_worker_shutdown_hook
+    cli_server "-C test/config/after_shutdown_hook.rb test/rackup/hello.ru"
+    get_worker_pids 0, 2 # make sure workers are booted
+    stop_server
+
+    ary = Array.new(2) do |_index|
+      wait_for_server_to_match(/(after_worker_shutdown worker=\d status=\d+)/, 1)
+    end.sort
+
+    assert_equal 'after_worker_shutdown worker=0 status=0', ary[0]
+    assert_equal 'after_worker_shutdown worker=1 status=0', ary[1]
+  end
+
+  def test_hook_error_handler_reraise_crashes_worker
+    cli_server "-w 1 test/rackup/hello.ru", merge_err: true, no_wait: true, config: <<~'CONFIG'
+      before_worker_boot do
+        raise "hook_error_handler test failure"
+      end
+
+      hook_error_handler do |err, hook|
+        puts "handler saw #{hook}"
+        raise err
+      end
+    CONFIG
+
+    assert wait_for_server_to_include('handler saw before_worker_boot')
+    assert wait_for_server_to_include('handler saw before_worker_boot')
+    refute_includes @server_log, 'booted in'
+  end
+
+  def test_worker_hook_warning_cli
+    cli_server "-w2 test/rackup/hello.ru", config: <<~CONFIG
+      before_worker_boot(:test) do |index, data|
+        data[:test] = index
+      end
+    CONFIG
+
+    get_worker_pids
+    line = @server_log[/^Warning.+before_worker_boot.+/]
+    refute line, "Warning below should not be shown!\n#{line}"
+  end
+
+  def test_worker_hook_warning_web_concurrency
+    cli_server "test/rackup/hello.ru",
+      env: { 'WEB_CONCURRENCY' => '2'},
+      config: <<~CONFIG
+        before_worker_boot(:test) do |index, data|
+          data[:test] = index
+        end
+      CONFIG
+
+    get_worker_pids
+    line = @server_log[/^Warning.+.+before_worker_boot.+/]
+    refute line, "Warning below should not be shown!\n#{line}"
+  end
+
+  def test_puma_debug_worker_hook
+    cli_server "-w #{workers} test/rackup/hello.ru", puma_debug: true, config: "before_worker_boot {}"
+
+    assert wait_for_server_to_include("Running before_worker_boot hooks")
+  end
+
+  def test_puma_debug_loaded_exts
+    cli_server "-w #{workers} test/rackup/hello.ru", puma_debug: true
+
+    assert wait_for_server_to_include('Loaded Extensions - worker 0:')
+    assert wait_for_server_to_include('Loaded Extensions - master:')
+    @pid = @server.pid
+  end
+
+  private
+
+  def promoted_mold_pid
+    @server_log.scan(/Promoting worker \d \(PID: (\d+)\) to mold/).last.first.to_i
+  end
+
+  def send_requests_until_phase(phase, size = workers)
+    sending = true
+    sender = Thread.new do
+      while sending
+        begin
+          socket = connect
+          read_body socket
+        rescue IOError, SystemCallError
+        ensure
+          socket&.close
+        end
+        sleep 0.005
+      end
+    end
+    get_worker_pids phase, size
+  ensure
+    sending = false
+    sender&.join
+  end
+
+  def worker_timeout(timeout, iterations, details, config, log: nil)
+    cli_server "-w #{workers} -t 1:1 test/rackup/hello.ru", config: config
+
+    pids = []
+    re = /Terminating timed out worker \(Worker \d+ #{details}\): (\d+)/
+
+    Timeout.timeout(iterations * (timeout + 1.5)) do
+      while (pids.size < workers * iterations)
+        idx = wait_for_server_to_match(re, 1).to_i
+        pids << idx
+      end
+    end
+
+    assert_equal pids, pids.uniq
+  end
+
+  # Send requests 10 per second.  Send 10, then :TERM server, then send another 30.
+  # No more than 10 should throw Errno::ECONNRESET.
+  def term_closes_listeners(unix: false)
+    cli_server "-w #{workers} -t 0:6 -q test/rackup/sleep_step.ru", unix: unix
+    threads = []
+    replies = []
+    mutex = Mutex.new
+    div   = 10
+    start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    41.times.each do |i|
+      if i == 10
+        threads << Thread.new do
+          delay = start_time + (i.to_f / div) - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          sleep delay if delay > 0
+          Process.kill :TERM, @pid
+          mutex.synchronize { replies[i] = :term_sent }
+        end
+      else
+        threads << Thread.new do
+          thread_run_step replies, start_time, i.to_f / div, 1, i, mutex, unix: unix
+        end
+      end
+    end
+
+    threads.each(&:join)
+
+    failures      = replies.count(:failure)
+    successes     = replies.count(:success)
+    resets        = replies.count(:reset)
+    refused       = replies.count(:refused)
+    read_timeouts = replies.count(:read_timeout)
+
+    r_success = replies.rindex(:success)
+    l_reset   = replies.index(:reset)
+    r_reset   = replies.rindex(:reset)
+    l_refused = replies.index(:refused)
+
+    msg = "#{successes} successes, #{resets} resets, #{refused} refused, #{failures} failures, #{read_timeouts} read timeouts"
+
+    assert_equal 0, failures, msg
+    assert_equal 0, read_timeouts, msg
+
+    assert_operator 9,  :<=, successes, msg
+
+    assert_operator 10, :>=, resets   , msg
+
+    assert_operator 20, :<=, refused  , msg
+
+    # Interleaved asserts
+    # UNIX binders do not generate :reset items
+    if l_reset
+      assert_operator r_success, :<, l_reset  , "Interleaved success and reset"
+      assert_operator r_reset  , :<, l_refused, "Interleaved reset and refused"
+    else
+      assert_operator r_success, :<, l_refused, "Interleaved success and refused"
+    end
+
+  ensure
+    if passed?
+      $debugging_info << "#{full_name}\n    #{msg}\n"
+    else
+      $debugging_info << "#{full_name}\n    #{msg}\n#{replies.inspect}\n"
+    end
+  end
+
+  def worker_respawn(phase = 1, size = workers, config = 'test/config/worker_respawn.rb')
+    threads = []
+
+    cli_server "-w #{workers} -t 1:1 -C #{config} test/rackup/sleep_pid.ru"
+
+    # make sure two workers have booted
+    phase0_worker_pids = get_worker_pids
+
+    [35, 40].each do |sleep_time|
+      threads << Thread.new do
+        begin
+          connect "sleep#{sleep_time}"
+          # stuck connections will raise IOError or Errno::ECONNRESET
+          # when shutdown
+        rescue IOError, Errno::ECONNRESET
+        end
+      end
+    end
+
+    @start_time = Time.now.to_f
+
+    # below should 'cancel' the phase 0 workers, either via phased_restart or
+    # externally TERM'ing them
+    yield phase0_worker_pids
+
+    # wait for new workers to boot
+    phase1_worker_pids = get_worker_pids phase
+
+    # should be empty if all phase 0 workers cleanly exited
+    phase0_exited = bad_exit_pids phase0_worker_pids
+
+    # Since 35 is the shorter of the two requests, server should restart
+    # and cancel both requests
+    assert_operator (Time.now.to_f - @start_time).round(2), :<, 35
+
+    msg = "phase0_worker_pids #{phase0_worker_pids.inspect}  phase1_worker_pids #{phase1_worker_pids.inspect}  phase0_exited #{phase0_exited.inspect}"
+    assert_equal workers, phase0_worker_pids.length, msg
+
+    assert_equal workers, phase1_worker_pids.length, msg
+    assert_empty phase0_worker_pids & phase1_worker_pids, "#{msg}\nBoth workers should be replaced with new"
+
+    assert_empty phase0_exited, msg
+
+    threads.each { |th| Thread.kill th }
+  end
+
+  # Returns an array of pids still in the process table, so it should
+  # be empty for a clean exit.
+  # Process.kill should raise the Errno::ESRCH exception, indicating the
+  # process is dead and has been reaped.
+  def bad_exit_pids(pids)
+    t = pids.map do |pid|
+      begin
+        pid if Process.kill 0, pid
+      rescue Errno::ESRCH
+        nil
+      end
+    end
+    t.compact!; t
+  end
+
+  # used in loop to create several 'requests'
+  def thread_run_pid(replies, delay, sleep_time, mutex, refused, unix: false)
+    begin
+      sleep delay
+      s = fast_connect "sleep#{sleep_time}", unix: unix
+      body = read_body(s, 20)
+      mutex.synchronize { replies << body }
+    rescue Errno::ECONNRESET
+      # connection was accepted but then closed
+      # client would see an empty response
+      mutex.synchronize { replies << :reset }
+    rescue *refused
+      mutex.synchronize { replies << :refused }
+    rescue Timeout::Error
+      mutex.synchronize { replies << :read_timeout }
+    end
+  end
+
+  # used in loop to create several 'requests'
+  def thread_run_step(replies, start_time, delay, sleep_time, step, mutex, unix: false)
+    refused = thread_run_refused unix: unix
+    begin
+      sleep_until = start_time + delay
+      sleep_time_left = sleep_until - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      sleep sleep_time_left if sleep_time_left > 0
+      s = connect "sleep#{sleep_time}-#{step}", unix: unix
+      body = read_body(s, 20)
+      if body[/\ASlept /]
+        mutex.synchronize { replies[step] = :success }
+      else
+        mutex.synchronize { replies[step] = :failure }
+      end
+    rescue Errno::ECONNRESET
+      # connection was accepted but then closed
+      # client would see an empty response
+      mutex.synchronize { replies[step] = :reset }
+    rescue *refused
+      mutex.synchronize { replies[step] = :refused }
+    rescue Timeout::Error
+      mutex.synchronize { replies[step] = :read_timeout }
+    end
+  end
+
+end if ::Process.respond_to?(:fork)

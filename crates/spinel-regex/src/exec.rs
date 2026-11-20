@@ -156,6 +156,13 @@ const MAX_PROGRAM: usize = 100_000;
 /// nothing at all. Tuned well above anything ruby/spec needs.
 const MAX_STEPS: u64 = 5_000_000;
 
+/// What each byte of the subject adds to [`MAX_STEPS`]: a match that walks a
+/// long subject once — `/x+tail\z/` over a few megabytes of request body —
+/// takes a few steps a byte, which a fixed budget refused past a megabyte or
+/// so, while backtracking built to blow up still runs out of a budget that
+/// grows only with the subject's length.
+const STEPS_PER_BYTE: u64 = 64;
+
 /// How deep sub-programs may nest, each one a native frame of [`Program::run`].
 ///
 /// ponytail: Onigmo keeps this nesting on a heap stack and has no such limit.
@@ -938,9 +945,10 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn new(deadline: Option<Instant>) -> Ctx {
+    fn new(deadline: Option<Instant>, subject_len: usize) -> Ctx {
+        let len = u64::try_from(subject_len).unwrap_or(u64::MAX);
         Ctx {
-            budget: MAX_STEPS,
+            budget: MAX_STEPS.saturating_add(len.saturating_mul(STEPS_PER_BYTE)),
             deadline,
             steps: 0,
             history: Vec::new(),
@@ -990,7 +998,7 @@ impl Program {
         start: usize,
         deadline: Option<Instant>,
     ) -> Result<Option<Match>, Error> {
-        let mut ctx = Ctx::new(deadline);
+        let mut ctx = Ctx::new(deadline, haystack.len());
         let mut at = start;
         loop {
             if let Some(m) = self.run_from(haystack, at, start, &mut ctx)? {
@@ -1013,7 +1021,12 @@ impl Program {
         start: usize,
         deadline: Option<Instant>,
     ) -> Result<Option<Match>, Error> {
-        self.run_from(haystack, start, start, &mut Ctx::new(deadline))
+        self.run_from(
+            haystack,
+            start,
+            start,
+            &mut Ctx::new(deadline, haystack.len()),
+        )
     }
 
     /// One attempt at `at` with `\G` anchored at `anchor`: a step of a
@@ -1026,7 +1039,12 @@ impl Program {
         anchor: usize,
         deadline: Option<Instant>,
     ) -> Result<Option<Match>, Error> {
-        self.run_from(haystack, at, anchor, &mut Ctx::new(deadline))
+        self.run_from(
+            haystack,
+            at,
+            anchor,
+            &mut Ctx::new(deadline, haystack.len()),
+        )
     }
 
     /// One attempt at `at`. `start` is where the whole search began, which is

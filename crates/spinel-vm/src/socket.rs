@@ -742,6 +742,11 @@ pub fn sockaddr_in(addr: &[u8], port: u16, flowinfo: u32, scope_id: u32) -> Opti
 
 /// A `sockaddr_un` for `path`, as long as it is: CRuby's is no longer than
 /// the path needs. None when the path does not fit.
+///
+/// On Linux an empty path, or one starting with a NUL, names a socket in the
+/// abstract namespace, where every byte of the name counts, trailing NULs
+/// too, so the address is as long as the name and no longer, as CRuby's
+/// `rsock_unix_sockaddr_len` makes it.
 pub fn sockaddr_un(path: &[u8]) -> Option<Vec<u8>> {
     // SAFETY: an all-zero `sockaddr_un` is a valid one.
     let mut out: libc::sockaddr_un = unsafe { zeroed() };
@@ -756,7 +761,12 @@ pub fn sockaddr_un(path: &[u8]) -> Option<Vec<u8>> {
     for (slot, &byte) in out.sun_path.iter_mut().zip(path) {
         *slot = byte as libc::c_char;
     }
-    Some(raw_bytes(&out))
+    let mut bytes = raw_bytes(&out);
+    if cfg!(any(target_os = "linux", target_os = "android")) && path.first().is_none_or(|&b| b == 0)
+    {
+        bytes.truncate(std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len());
+    }
+    Some(bytes)
 }
 
 fn raw_bytes<T>(value: &T) -> Vec<u8> {
@@ -803,6 +813,11 @@ pub fn parse(bytes: &[u8]) -> Option<Parsed> {
         libc::AF_UNIX => {
             let start = std::mem::offset_of!(libc::sockaddr_un, sun_path);
             let path = bytes.get(start..).unwrap_or_default();
+            // A name in Linux's abstract namespace is every byte the address
+            // holds, its leading NUL included, as `rsock_unixpath_str` reads it.
+            if cfg!(any(target_os = "linux", target_os = "android")) && path.first() == Some(&0) {
+                return Some(Parsed::Unix(path.to_vec()));
+            }
             let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
             Some(Parsed::Unix(path[..end].to_vec()))
         }

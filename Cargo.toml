@@ -4,6 +4,7 @@ members = [
   "crates/*",
   "gems/nio4r-spinel/ext/nio4r_spinel",
   "gems/pg-spinel/ext/pg_spinel",
+  "gems/puma-spinel/ext/puma_spinel",
   "gems/sqlite3-spinel/ext/sqlite3_spinel",
 ]
 # pg-spinel's extension links the system's libpq, so only `--workspace` and
@@ -11,6 +12,7 @@ members = [
 default-members = [
   "crates/*",
   "gems/nio4r-spinel/ext/nio4r_spinel",
+  "gems/puma-spinel/ext/puma_spinel",
   "gems/sqlite3-spinel/ext/sqlite3_spinel",
 ]
 

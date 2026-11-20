@@ -10,7 +10,7 @@
 //! as "blocked" rather than as a pass. Silence is what is forbidden,
 //! not incompleteness.
 
-use spinel_regex::{Error, Flags, Regex};
+use spinel_regex::{Encoding, Error, Flags, Regex};
 
 const TABLE: &str = include_str!("oracle.txt");
 
@@ -166,7 +166,19 @@ fn replay_table(table: &str, inputs: &[&str]) -> Tally {
             continue;
         }
 
-        let re = match Regex::new(&source, Flags::default()) {
+        // A pattern from a `# encoding: binary` spec file (`escapes_spec.rb`'s
+        // `/\xAA/`) is a binary Regexp in Ruby, which raises rather than
+        // answers for a subject past ASCII. It is compiled as one here, and
+        // only the subjects Ruby answered for are compared: the raise is the
+        // VM's, not the engine's.
+        const INCOMPATIBLE: &str = "!Encoding::CompatibilityError";
+        let binary = expected.split(' ').any(|answer| answer == INCOMPATIBLE);
+        let compiled = if binary {
+            Regex::with_encoding(&source, Flags::default(), Encoding::Binary)
+        } else {
+            Regex::new(&source, Flags::default())
+        };
+        let re = match compiled {
             Ok(re) => re,
             // A refusal is a documented gap, not a wrong answer.
             Err(Error::Unsupported(what)) => {
@@ -189,7 +201,7 @@ fn replay_table(table: &str, inputs: &[&str]) -> Tally {
         }
         let mut mismatched = Vec::new();
         for ((subject, want), got) in inputs.iter().zip(&want).zip(&got) {
-            if want != got {
+            if want != got && !(binary && *want == INCOMPATIBLE) {
                 mismatched.push(format!("    on {subject:?}: ruby {want}, engine {got}"));
             }
         }

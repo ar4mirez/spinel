@@ -2007,17 +2007,23 @@ impl Classes {
     /// The walk `A::X` takes: `A`'s own table, then its ancestors' in order,
     /// skipping `Object` unless `A` *is* `Object`. Ruby 2.5's change is
     /// narrower than "no fallback": `Object` alone is skipped, while `Kernel`
-    /// and `BasicObject` are searched like any other ancestor.
+    /// and `BasicObject` are searched like any other ancestor. `A`'s own
+    /// table comes first even when a module is prepended to it, since a
+    /// prepend moves `A`'s methods behind the module and not its constants:
+    /// `Minitest::VERSION` is minitest's after `Minitest.prepend(Retry)`.
     pub(crate) fn const_qualified_owner(
         &self,
         id: ClassId,
         name: SymbolId,
     ) -> Option<(ClassId, Value)> {
+        if let Some(value) = self.const_get_here(id, name) {
+            return Some((id, value));
+        }
         let object = Builtin::Object.id();
         let skip_object = id != object;
         self.ancestors(id)
             .into_iter()
-            .filter(|&c| !(skip_object && c == object))
+            .filter(|&c| c != id && !(skip_object && c == object))
             .find_map(|c| self.const_get_here(c, name).map(|value| (c, value)))
     }
 
@@ -2068,7 +2074,14 @@ impl Classes {
         let innermost = self.cref_base(cref);
         let object = Builtin::Object.id();
         let ancestors = self.ancestors(innermost);
-        if let Some(value) = ancestors.iter().find_map(|&c| self.const_get_here(c, name)) {
+        // Its own table first, before any module prepended to it, as for
+        // `A::X` ([`Self::const_qualified_owner`]).
+        if let Some(value) = self.const_get_here(innermost, name).or_else(|| {
+            ancestors
+                .iter()
+                .filter(|&&c| c != innermost)
+                .find_map(|&c| self.const_get_here(c, name))
+        }) {
             return Some(value);
         }
 

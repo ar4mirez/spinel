@@ -3837,6 +3837,7 @@ fn run<'h>(
                             lambda,
                             frames[top].cref,
                             frames[top].home,
+                            (frames[top].owner, frames[top].defined_as),
                         );
                         stack.push(value);
                     }
@@ -5362,7 +5363,14 @@ pub(crate) const PROC_HOME: usize = 6;
 /// A `Proc` handed on with `&blk` keeps the first call's frame, which is Ruby:
 /// `def a(&b) = c(&b)` with `a { break 1 }` ends `a`, not `c`.
 pub(crate) const PROC_BREAK: usize = 7;
-pub(crate) const PROC_SLOTS: u32 = 8;
+/// The method the block was *written* in, as the frame it was made in had
+/// it — its owner's [`ClassId`] index and its name's [`SymbolId`], or `nil`
+/// outside a method — which a `super` in the body starts from when that
+/// frame is not on the stack the body runs on: a `Proc` run as a fiber's or
+/// a thread's first frame, or called after its method returned.
+const PROC_OWNER: usize = 8;
+const PROC_DEFINED_AS: usize = 9;
+pub(crate) const PROC_SLOTS: u32 = 10;
 
 /// What a call is going to run.
 enum Target {
@@ -6317,13 +6325,14 @@ fn yield_simple(
     let cref = cref_from(scope.slot_of(block, PROC_CREF));
     // What `push_proc_frame_as` reads off the frame the block was written
     // in, searched from the top for the reason given there.
-    let (scope_default, owner, defined_as) = frames
-        .iter()
-        .rev()
-        .find(|frame| frame.id == home)
-        .map_or((ScopeDefault::Public, None, None), |frame| {
-            (frame.scope_default, frame.owner, frame.defined_as)
-        });
+    let (scope_default, owner, defined_as) =
+        match frames.iter().rev().find(|frame| frame.id == home) {
+            Some(frame) => (frame.scope_default, frame.owner, frame.defined_as),
+            None => {
+                let (owner, defined_as) = proc_method(scope, block);
+                (ScopeDefault::Public, owner, defined_as)
+            }
+        };
     *ids += 1;
     let id = *ids;
     // The extras go, the missing are `nil`, and the rest are the first
@@ -6569,6 +6578,7 @@ fn pop_call<'h>(
                 false,
                 frame.cref,
                 frame.home,
+                (frame.owner, frame.defined_as),
             )
         }
         BlockRef::None => Value::NIL,
@@ -7211,14 +7221,15 @@ fn push_proc_frame_as(
     };
     // `super` inside a block resolves against the method the block was
     // *written* in — the frame `home` already names, for the same reason
-    // `return` does.
-    //
-    // ponytail: a `Proc` that outlives its defining frame finds nothing here,
-    // and a `super` in it raises "outside a method" rather than resolving. Give
-    // the `Proc` two slots of its own, beside `PROC_HOME`, if a spec needs it.
+    // `return` does — or, when that frame is not on this stack (a fiber's
+    // or a thread's first frame, a `Proc` called after its method
+    // returned), the method the `Proc` kept when it was made.
     let (owner, defined_as) = match role {
         ProcRole::Method => method_owner,
-        _ => home_frame.map_or((None, None), |f| (f.owner, f.defined_as)),
+        _ => match home_frame {
+            Some(f) => (f.owner, f.defined_as),
+            None => proc_method(scope, block),
+        },
     };
     let call = Pending {
         owner,
@@ -7826,6 +7837,7 @@ fn make_proc<'h>(
     lambda: bool,
     cref: CrefId,
     home: u64,
+    method: (Option<ClassId>, Option<SymbolId>),
 ) -> Value {
     // Read first: a body interned before is found without the class lock's
     // write, which would park every other Ractor (#119).
@@ -7854,7 +7866,35 @@ fn make_proc<'h>(
         PROC_BREAK,
         Value::fixnum(0).expect("zero is a fixnum"),
     );
+    let (owner, defined_as) = method;
+    let owner = owner.map_or(Value::NIL, |owner| {
+        Value::fixnum(owner.index() as i64).expect("a class index is a fixnum")
+    });
+    let defined_as = defined_as.map_or(Value::NIL, |name| {
+        Value::fixnum(i64::from(name.0)).expect("a symbol id is a fixnum")
+    });
+    scope.set_slot(handle, PROC_OWNER, owner);
+    scope.set_slot(handle, PROC_DEFINED_AS, defined_as);
     scope.get(handle)
+}
+
+/// The method a `Proc`'s body was written in, as [`make_proc`] kept it.
+pub(crate) fn proc_method(
+    scope: &HandleScope<'_>,
+    block: Value,
+) -> (Option<ClassId>, Option<SymbolId>) {
+    let read = |slot: usize| {
+        scope
+            .slot_of(block, slot)
+            .as_fixnum()
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let owner = read(PROC_OWNER).map(ClassId::from_index);
+    let defined_as = read(PROC_DEFINED_AS).map(SymbolId);
+    match (owner, defined_as) {
+        (Some(owner), Some(name)) => (Some(owner), Some(name)),
+        _ => (None, None),
+    }
 }
 
 /// An exception is two instance variables: what it says, and where it came
@@ -16478,6 +16518,32 @@ fn native_call<'h>(
         }
 
         Native::Raise => {
+            // `raise exception, msg` raises what `exception.exception(msg)`
+            // answers, a copy with the new message, as `rb_make_exception`
+            // sends it: `Exception#exception` is Ruby, so the send is.
+            // Its frame is hidden from the backtrace, as `raise`'s own is.
+            if call.args.len() >= 2 && is_exception(scope, call.args[0]) {
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__raise_exception_message__"),
+                    implicit_self: true,
+                    variable_call: false,
+                    public_only: false,
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch_shown(
+                    scope,
+                    stack,
+                    frames,
+                    forwarded,
+                    proc_class,
+                    ids,
+                    Shown::Hidden,
+                );
+            }
             // `raise Klass, msg` is `Klass.exception(msg)`, which is `new`. A
             // class whose `initialize` is Ruby — `Errno::ENOENT`, or any user
             // exception with its own — has to run it first, so this is `new`
@@ -17171,8 +17237,9 @@ fn relambda<'h>(
     // homes to itself when it is pushed. The old home is carried anyway so a
     // `Proc` that is re-lambda'd twice does not lose where it came from.
     let (home, _) = proc_links(scope, block);
+    let method = proc_method(scope, block);
     Ok(make_proc(
-        scope, proc_class, &iseq, env, receiver, captured, true, cref, home,
+        scope, proc_class, &iseq, env, receiver, captured, true, cref, home, method,
     ))
 }
 

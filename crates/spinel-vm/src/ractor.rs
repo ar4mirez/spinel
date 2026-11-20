@@ -1039,6 +1039,7 @@ pub(super) fn native(
                 return Ok(None);
             };
             let (home, _) = super::proc_links(scope, block);
+            let method = super::proc_method(scope, block);
             let proc_class = super::class_handle(scope, Builtin::Proc);
             let copy = super::make_proc(
                 scope,
@@ -1050,6 +1051,7 @@ pub(super) fn native(
                 lambda || was_lambda,
                 cref,
                 home,
+                method,
             );
             let copy = scope.root(copy);
             let receiver = scope.get(receiver);
@@ -1242,6 +1244,7 @@ fn block_proc(
         false,
         cref,
         0,
+        (None, None),
     ))
 }
 
@@ -1325,6 +1328,7 @@ mod tests {
             false,
             CrefId::ROOT,
             1,
+            (None, None),
         );
         let block = scope.root(block);
         scope.set_slot(block, super::super::PROC_BREAK, int(2));
@@ -1420,6 +1424,7 @@ mod tests {
             false,
             CrefId::ROOT,
             0,
+            (None, None),
         );
         let block = scope.root(block);
         let value = scope.get(block);

@@ -1,0 +1,12 @@
+["\\xef\\xbb\\xbf", #<Encoding:UTF-8>, 1, nil]
+["\\A\\xef\\xbb\\xbf", #<Encoding:UTF-8>, nil, nil]
+["\\xe3\\x81\\x82", #<Encoding:UTF-8>, nil, 1]
+["[\\xe3\\x81\\x82]", #<Encoding:UTF-8>, nil, 1]
+["\\343\\201\\202", #<Encoding:UTF-8>, nil, 1]
+["\\xff", RegexpError, "invalid multibyte escape: /\\xff/"]
+["\\xe3\\x81", RegexpError, "too short escaped multibyte character: /\\xe3\\x81/"]
+["\\xc3", RegexpError, "too short escaped multibyte character: /\\xc3/"]
+["[\\x80-\\xff]", RegexpError, "invalid multibyte escape: /[\\x80-\\xff]/"]
+1
+"hello"
+0

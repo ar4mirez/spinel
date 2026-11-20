@@ -70,8 +70,10 @@ class String
     self
   end
 
+  # `RSTRING_LEN(str) == 0`: no characters counted, which over a long
+  # String broken in its encoding scanned all of it, for each call.
   def empty?
-    length == 0
+    bytesize == 0
   end
 
   def first_char
