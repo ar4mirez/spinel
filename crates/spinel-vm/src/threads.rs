@@ -509,7 +509,14 @@ pub(super) fn spawn(
         held.turns.push(Arc::new(Condvar::new()));
         held.blocking.push(None);
     }
-    let (told, started) = std::sync::mpsc::channel();
+    // Its OS thread's id comes back through a mutex and a condition
+    // variable, not a channel: a channel's wait parks the thread, and on
+    // macOS a parked thread waits on a libdispatch semaphore made the first
+    // time it parks. A child forked after its main thread did that inherits
+    // the semaphore but not the Mach port under it, so the child's next wait
+    // there killed it with SIGTRAP.
+    let started = Arc::new((Mutex::new(None), Condvar::new()));
+    let told = Arc::clone(&started);
     let its_lock = Arc::clone(&lock);
     let spawned = std::thread::Builder::new()
         .stack_size(OS_STACK)
@@ -517,7 +524,9 @@ pub(super) fn spawn(
             // Signals go to the main thread's OS thread, which runs their
             // handlers and whose waits they cut short (#44).
             crate::shared::signals::block_on_this_thread();
-            let _ = told.send(native_id());
+            let (id, condvar) = &*told;
+            *id.lock().unwrap_or_else(PoisonError::into_inner) = Some(native_id());
+            condvar.notify_one();
             os_thread(&its_lock, index);
         });
     if let Err(error) = spawned {
@@ -533,7 +542,16 @@ pub(super) fn spawn(
             format!("can't create Thread: {reason}"),
         ));
     }
-    let native_id = started.recv().unwrap_or_default();
+    let native_id = {
+        let (id, condvar) = &*started;
+        let mut id = id.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(native_id) = *id {
+                break native_id;
+            }
+            id = condvar.wait(id).unwrap_or_else(PoisonError::into_inner);
+        }
+    };
     scope.fibers_mut().threads.entries.push(ThreadEntry {
         object,
         state: ThreadState::Ready {
