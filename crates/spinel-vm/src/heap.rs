@@ -109,10 +109,17 @@ const KEYWORDS: u8 = 0b10_0000;
 /// Set on a `Proc` made shareable (#118): by `Ractor.make_shareable`,
 /// `Ractor.shareable_proc` or `shareable_lambda`, once its `self` and the
 /// variables it reads outside itself were found shareable and its
-/// environment was replaced by a copy holding only those. Always with
-/// [`FROZEN`]. `docs/engine.md`'s `ractor-shareable` bit: a frozen `Proc` is
-/// not shareable without it, and one with it crosses between Ractors as a
-/// copy where any other `Proc` is refused.
+/// environment was replaced by a copy holding only those. On a `Proc`,
+/// always with [`FROZEN`]. `docs/engine.md`'s `ractor-shareable` bit: a
+/// frozen `Proc` is not shareable without it, and one with it crosses
+/// between Ractors as a copy where any other `Proc` is refused.
+///
+/// The one object that has it without [`FROZEN`] is `ENV` (#865), which
+/// CRuby 4.0.9 shares unfrozen: its state is the process's environment, not
+/// its own. A copy of an object with this bit is shareable whatever it
+/// holds, keeps its singleton class, so each Ractor's `ENV` has `ENV`'s
+/// methods, and carries none of the original's instance variables
+/// (`heap/copy.rs`).
 ///
 /// ponytail: `Proc#dup` and `#clone` make a cell without it, so the copy of
 /// a shareable `Proc` is not shareable, where CRuby's is. Carrying it is a
@@ -2181,6 +2188,15 @@ impl<'h> HandleScope<'h> {
         let object = self.object(handle);
         // SAFETY: the handle roots a live object of this heap.
         unsafe { (*object.header()).flags |= FROZEN | SHAREABLE };
+    }
+
+    /// Mark the object `handle` roots shareable and leave it as frozen as it
+    /// was: `ENV` (#865), which every Ractor may use while it changes, as
+    /// CRuby's may. See [`SHAREABLE`].
+    pub(crate) fn share(&mut self, handle: Handle<'h>) {
+        let object = self.object(handle);
+        // SAFETY: the handle roots a live object of this heap.
+        unsafe { (*object.header()).flags |= SHAREABLE };
     }
 
     /// See [`Heap::release_classes`].

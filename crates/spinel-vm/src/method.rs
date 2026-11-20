@@ -580,6 +580,9 @@ pub enum Native {
     /// `Kernel#__setenv__(name, value)`: set one variable of the process
     /// environment, or with `value` nil remove it. Nil, or the errno.
     Setenv,
+    /// `Kernel#__environ_writes__`: how many writes `__setenv__` has made,
+    /// in every Ractor of the program (`ractor::Program`, #865).
+    EnvironWrites,
     /// The file system calls `File` and `Dir` are Ruby over (#39).
     Fs(FsOp),
     /// The process's identity and clocks, for `Process` (#145).
@@ -1540,6 +1543,9 @@ pub enum RactorOp {
     Start,
     /// `__ractor_shareable__(object)`.
     Shareable,
+    /// `__ractor_share__(object)`: mark it shareable and leave it unfrozen,
+    /// as CRuby's `ENV` is (#865).
+    Share,
     /// `__ractor_monitor__(id, port, add)`.
     Monitor,
     /// `__ractor_freeze__(objects)`.

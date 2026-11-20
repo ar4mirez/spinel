@@ -131,15 +131,12 @@ end
 # The environment, as `ENV`: a live view of the process's own, as CRuby's
 # is. Every read goes to the process and every write is `setenv(3)` or
 # `unsetenv(3)`, so a child, a C library and `ENV` all see one environment.
-# ponytail: unlike CRuby's, this `ENV` is not shareable, so a Ractor other
-# than the main one that touches it raises `Ractor::IsolationError` ("can not
-# access non-shareable objects in constant Object::ENV"). Its cache lives in
-# instance variables (`@cached`, `@cached_for`) on this object, and Spinel's
-# shareable flag also freezes, so making it shareable means moving that cache
-# off it while `ENV.frozen?` stays false. The upgrade, with a test of parallel
-# Ractors writing and reading ENV, is
-# https://github.com/ar4mirez/spinel/issues/865.
+# As CRuby 4.0.9's, it is shareable and not frozen (#865): every Ractor may
+# read and write it, through the process's one environment lock
+# (`shared/env.rs`). Another Ractor's `ENV` is a copy of this one, as any
+# shareable object it reads is, with these methods.
 ENV = Object.new
+__ractor_share__(ENV)
 
 class << ENV
   include Enumerable
@@ -148,15 +145,19 @@ class << ENV
   def __table__ = __cached__.dup
 
   # The same, not to be changed: built from the process the first time it is
-  # asked for and kept until a write through `ENV` or a change of encoding,
-  # since building one costs a Hash insert per variable (#729).
+  # asked for and kept until a write through `ENV`, in any Ractor, or a
+  # change of encoding, since building one costs a Hash insert per variable
+  # (#729). Each Ractor keeps its own, in its `ENV`; the count of writes is
+  # the program's, which every Ractor adds to (#865).
   # ponytail: a variable a native library sets with `setenv(3)` itself is
   # seen by `[]` and `fetch` at once, which ask the process, and by the
   # enumerating methods after the next write through `ENV`.
   def __cached__
     locale = Encoding.find("locale")
     internal = Encoding.default_internal
-    return @cached if @cached && @cached_for == [locale, internal]
+    writes = __environ_writes__
+    cached = @__cached__
+    return cached if cached && @__cached_for__ == [locale, internal, writes]
     table = {}
     pairs = __environ__
     # What `__environ__` answers is UTF-8; under a UTF-8 locale with no
@@ -171,8 +172,8 @@ class << ENV
       end
       i += 2
     end
-    @cached_for = [locale, internal]
-    @cached = table
+    @__cached_for__ = [locale, internal, writes]
+    @__cached__ = table
   end
 
   def __lookup__(name)
@@ -218,7 +219,6 @@ class << ENV
   end
 
   def __set__(name, value)
-    @cached = nil
     result = __setenv__(name, value)
     raise SystemCallError.new("setenv(#{name})", result) if Integer === result
     value

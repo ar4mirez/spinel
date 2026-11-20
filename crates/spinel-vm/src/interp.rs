@@ -15186,6 +15186,7 @@ fn native_call<'h>(
                 Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
                     let name = std::ffi::OsString::from_vec(name);
                     let _env = crate::shared::env::lock();
+                    scope.program().wrote_env();
                     match value {
                         // SAFETY: `set_var` and `remove_var` race only with a
                         // read of the environment that does not take std's
@@ -15215,6 +15216,14 @@ fn native_call<'h>(
                 _ => Value::NIL,
             };
             stack.push(answer);
+            Ok(None)
+        }
+        Native::EnvironWrites => {
+            // A count of writes, which no program makes 2^62 of: kept within
+            // a fixnum, it is only ever compared for a change.
+            let writes = scope.program().env_writes() & (Value::FIXNUM_MAX as u64);
+            let writes = Value::fixnum(writes as i64).expect("masked to a fixnum");
+            stack.push(writes);
             Ok(None)
         }
         Native::Environ => {
@@ -17898,6 +17907,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__ractor_share__"],
+            Native::Ractor(crate::method::RactorOp::Share),
+        ),
+        (
+            Builtin::Kernel,
             &["__ractor_monitor__"],
             Native::Ractor(crate::method::RactorOp::Monitor),
         ),
@@ -18323,6 +18337,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__environ__"], Native::Environ),
         (Builtin::Kernel, &["__getenv__"], Native::Getenv),
         (Builtin::Kernel, &["__setenv__"], Native::Setenv),
+        (
+            Builtin::Kernel,
+            &["__environ_writes__"],
+            Native::EnvironWrites,
+        ),
         (Builtin::Kernel, &["__fs_kind__"], Native::Fs(FsOp::Kind)),
         (
             Builtin::Kernel,
