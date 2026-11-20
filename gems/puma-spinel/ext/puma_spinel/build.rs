@@ -3,7 +3,10 @@
 //! left out (`OPENSSL_NO_SSL3`, `OPENSSL_NO_TLS1`, `OPENSSL_NO_TLS1_1` and
 //! their `_METHOD`s), read from the headers openssl-sys found
 //! (`DEP_OPENSSL_INCLUDE`) as the C preprocessor reads them, for
-//! `src/minissl.rs`'s constants.
+//! `src/minissl.rs`'s constants. Like the preprocessor on Debian and Ubuntu,
+//! it looks in the target's multiarch directory first
+//! (`/usr/include/x86_64-linux-gnu/openssl/configuration.h`), then in the
+//! include directory itself.
 
 use std::path::PathBuf;
 
@@ -11,8 +14,19 @@ fn main() {
     let include = std::env::var_os("DEP_OPENSSL_INCLUDE")
         .map(PathBuf::from)
         .expect("openssl-sys names the headers it found");
+    let cfg = |name: &str| std::env::var(name).unwrap_or_default();
+    let multiarch = format!(
+        "{}-{}-{}",
+        cfg("CARGO_CFG_TARGET_ARCH"),
+        cfg("CARGO_CFG_TARGET_OS"),
+        cfg("CARGO_CFG_TARGET_ENV")
+    );
     let header = |name: &str| {
-        let path = include.join("openssl").join(name);
+        let path = [include.join(&multiarch), include.clone()]
+            .into_iter()
+            .map(|dir| dir.join("openssl").join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| include.join("openssl").join(name));
         println!("cargo:rerun-if-changed={}", path.display());
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
     };

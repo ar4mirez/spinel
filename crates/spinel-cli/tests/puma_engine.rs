@@ -49,7 +49,14 @@ fn check(name: &str) {
     );
     let expected = std::fs::read_to_string(fixtures().join(format!("{name}.out")))
         .unwrap_or_else(|error| panic!("{name}.out is readable: {error}"));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    // A forked child's failure leaves its parent's status alone and shows
+    // only on stderr.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        expected,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
