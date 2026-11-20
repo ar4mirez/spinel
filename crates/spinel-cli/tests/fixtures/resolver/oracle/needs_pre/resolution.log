@@ -28,3 +28,28 @@ conflict: every version of needs_pre depends on lib >= 2.0.a
 ! needs_pre >= 0 is satisfied by needs_pre >= 0
 ! which is caused by Gemfile depends on needs_pre >= 0
 ! thus version solving has failed
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on needs_pre >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: needs_pre >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting needs_pre 1.0
+fact: every version of needs_pre depends on lib >= 2.0.a
+selected needs_pre 1.0
+derived: lib >= 2.0.a
+attempting lib 2.0.beta
+selected lib 2.0.beta
+Solution found after 1 attempts:
+* RubyGems 4.0.16
+* Ruby 4.0.0
+* needs_pre 1.0
+* lib 2.0.beta

@@ -418,9 +418,10 @@ enum Command {
 
         /// The solver to resolve with: `pubgrub`, the one `spinel install`
         /// uses, or `pubgrub-ruby`, the port of Bundler's under way (#816),
-        /// which takes no lockfile and does not yet retry a failure. With
-        /// `DEBUG_RESOLVER` set, `pubgrub-ruby` logs its facts and decisions
-        /// on standard error as Bundler does.
+        /// which takes no lockfile yet. With `DEBUG_RESOLVER` set,
+        /// `pubgrub-ruby` logs its facts and decisions on standard error as
+        /// Bundler does, and with `SPINEL_DEBUG_RELAX` either solver prints
+        /// what each failed try relaxes.
         // ponytail: the switch lives while #816 is ported in slices; slice 5
         // makes `pubgrub-ruby` the only solver and removes it.
         #[arg(

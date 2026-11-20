@@ -5,9 +5,9 @@ An opt-in tool, never run by CI. For each case directory (as `bundle_case.sh`
 takes: `info/<gem>` and `Gemfile.gems`), the index is served on 127.0.0.1;
 Bundler locks it through `bundler_oracle.rb` with DEBUG_RESOLVER set, and
 `spinel resolve --solver pubgrub-ruby` resolves it with DEBUG_RESOLVER set.
-Both print pubgrub-ruby's log; the first try of each is kept (Bundler's
-retries, after `find_names_to_relax`, start again at `fact: (root
-dependency)`), and the lines that record decisions are compared:
+Both print pubgrub-ruby's log, every try of the resolution (each retry after
+`find_names_to_relax` starts again at `fact: (root dependency)`), and the
+lines that record decisions are compared:
 
   attempting <gem> <version>   the strategy's choice
   selected <gem> <version>     a decision made
@@ -23,9 +23,11 @@ the source as one that may also install locally, which Spinel's does not
       --spinel target/debug/spinel crates/spinel-cli/tests/fixtures/resolver/oracle/*
 
 Prints `same` or the first lines that differ for each case, and exits 1 when
-any differs. With --write, Bundler's first try is also written, every line
-(less a trailing space), to `first_try.log` in each case directory: what the
-resolver's unit tests hold the port to. Written with Bundler 4.0.20 on Ruby 4.0.9.
+any differs. With --write, Bundler's log is also written, every line (less a
+trailing space), to `resolution.log` in each case directory, and what each
+of its tries' `find_names_to_relax` returned, as `relax_hook.rb` logs it, to
+`relax.log`: what the resolver's unit tests hold the port to. Written with
+Bundler 4.0.20 on Ruby 4.0.9.
 """
 
 import argparse
@@ -69,17 +71,13 @@ def read_case(case):
 
 
 def log_lines(text, source):
-    """pubgrub-ruby's lines of the first try, one per line.
+    """pubgrub-ruby's lines, one per line.
 
     Bundler's shell does not end a line that ends in a space, so a version
     the strategy found none of (`attempting g3 `) runs into the next line."""
     text = text.replace(source, "@SOURCE@").replace("@SOURCE@ or installed locally", "@SOURCE@")
     text = RUN_IN.sub(r"\1\n", text)
-    lines = [line for line in text.split("\n") if PUBGRUB.match(line)]
-    starts = [i for i, line in enumerate(lines) if line == "fact: (root dependency)"]
-    if len(starts) > 1:
-        lines = lines[: starts[1]]
-    return lines
+    return [line for line in text.split("\n") if PUBGRUB.match(line)]
 
 
 def bundler_log(case_dir, source, gemfile):
@@ -98,7 +96,8 @@ def bundler_log(case_dir, source, gemfile):
         "ORACLE_PLATFORM": "x86_64-linux",
         "ORACLE_RUBY": "4.0.0",
         "ORACLE_RUBYGEMS": "4.0.16",
-        "RUBYOPT": f"-r{os.path.join(HERE, 'bundler_oracle.rb')}",
+        "RUBYOPT": f"-r{os.path.join(HERE, 'bundler_oracle.rb')} -r{os.path.join(HERE, 'relax_hook.rb')}",
+        "RELAX_LOG": os.path.join(case_dir, "relax.log"),
         "DEBUG_RESOLVER": "1",
     }
     out = subprocess.run(["bundle", "lock"], cwd=app, env=env, capture_output=True, text=True, timeout=300)
@@ -131,7 +130,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--spinel", required=True)
     parser.add_argument("--all", action="store_true", help="compare every line, not only decisions")
-    parser.add_argument("--write", action="store_true", help="write Bundler's first try to <case>/first_try.log")
+    parser.add_argument("--write", action="store_true",
+                        help="write Bundler's log to <case>/resolution.log and its relaxations to <case>/relax.log")
     parser.add_argument("cases", nargs="+", help="case directories: info/<gem> and Gemfile.gems")
     args = parser.parse_args()
     spinel = os.path.abspath(args.spinel)
@@ -157,8 +157,13 @@ def main():
             ours = log_lines(spinel_log(spinel, case_dir, source, gemfile), source)
             theirs = log_lines(bundler_log(case_dir, source, gemfile), source)
             if args.write:
-                with open(os.path.join(case, "first_try.log"), "w") as f:
+                with open(os.path.join(case, "resolution.log"), "w") as f:
                     f.write("".join(f"{line.rstrip()}\n" for line in theirs))
+                relax = os.path.join(case_dir, "relax.log")
+                with open(os.path.join(case, "relax.log"), "w") as f:
+                    if os.path.exists(relax):
+                        with open(relax) as log:
+                            f.write(log.read())
             if not args.all:
                 ours = [line for line in ours if DECISIONS.match(line)]
                 theirs = [line for line in theirs if DECISIONS.match(line)]

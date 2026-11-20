@@ -21,7 +21,9 @@ use super::solver::{
     Cause, Incompatibility, RangeSet, Source, Strategy, Term, VersionConstraint, VersionRange,
     candidate_range,
 };
-use super::{Candidate, Package, PackageName, Provider, dependency_hash};
+use super::{
+    Candidate, Package, PackageName, Provider, Spec, dependency_hash, other_specs_matching_message,
+};
 
 type Constraint = VersionConstraint<Package, Candidate>;
 
@@ -211,11 +213,10 @@ impl Source<Package, Candidate> for BundlerSource<'_, '_> {
     }
 
     /// `no_versions_incompatibility_for`: no version of the package
-    /// satisfies `unsatisfied_term`, explained as Bundler explains it.
-    // ponytail: the `extended_explanation` Bundler attaches (the source's
-    // builds for other platforms) is left to slice 3 of #816, whose
-    // `find_names_to_relax` reads it, and slice 4, whose `FailureWriter`
-    // prints it. Bundler's cooldown hint has no counterpart: Spinel has no
+    /// satisfies `unsatisfied_term`, explained as Bundler explains it, with
+    /// the builds for other platforms that satisfy it listed as its extended
+    /// explanation.
+    // ponytail: Bundler's cooldown hint has no counterpart: Spinel has no
     // cooldown yet.
     fn no_versions_incompatibility_for(
         &mut self,
@@ -224,14 +225,26 @@ impl Source<Package, Candidate> for BundlerSource<'_, '_> {
     ) -> Rc<Incompatibility<Package, Candidate>> {
         let cause = Cause::NoVersions(unsatisfied_term.clone());
         let constraint = unsatisfied_term.constraint();
-        let custom_explanation = match package {
+        let (custom_explanation, extended_explanation) = match package {
             // `bundler_pinned_to_current_version?`: `Source::Metadata`'s
             // `bundler` is the only one, as with no `bundle update --bundler`.
-            Package::Name(PackageName::Gem(name)) if name == "bundler" => format!(
-                "the current Bundler version ({BUNDLER_VERSION}) does not satisfy {constraint}"
+            // `bundler_not_found_message`: the default source's `bundler` is
+            // that same one, which the constraint rules out.
+            Package::Name(PackageName::Gem(name)) if name == "bundler" => (
+                format!(
+                    "the current Bundler version ({BUNDLER_VERSION}) does not satisfy {constraint}"
+                ),
+                Some(
+                    "Your bundle requires a different version of Bundler than the one you're \
+                     running, and that version could not be found.\n"
+                        .to_owned(),
+                ),
             ),
             _ => {
-                let platforms = if self.specs_matching(package, constraint) {
+                let specs = self.specs_matching_other_platforms(package, constraint);
+                let platforms = if specs.is_empty() {
+                    String::new()
+                } else {
                     let platforms: Vec<String> = self
                         .provider
                         .package_platforms(package)
@@ -239,43 +252,126 @@ impl Source<Package, Candidate> for BundlerSource<'_, '_> {
                         .map(ToString::to_string)
                         .collect();
                     format!(" for any resolution platforms ({})", platforms.join(", "))
-                } else {
-                    String::new()
                 };
-                format!(
+                let custom = format!(
                     "{constraint} could not be found in {}{platforms}",
                     self.repository_for(package)
-                )
+                );
+                let label = format!("{package} ({})", constraint.constraint_string());
+                let specs: Vec<&Spec> = specs.iter().collect();
+                let extended =
+                    (!specs.is_empty()).then(|| other_specs_matching_message(&specs, &label));
+                (custom, extended)
             }
         };
-        Rc::new(Incompatibility::new(
-            vec![unsatisfied_term.clone()],
-            cause,
-            Some(custom_explanation),
-        ))
+        Rc::new(
+            Incompatibility::new(
+                vec![unsatisfied_term.clone()],
+                cause,
+                Some(custom_explanation),
+            )
+            .with_extended_explanation(extended_explanation),
+        )
     }
 }
 
 impl BundlerSource<'_, '_> {
-    /// Whether any of the gem's builds, for any platform, satisfies the
-    /// constraint as Bundler reads it back from its string
-    /// (`filter_matching_specs(@all_specs[name], requirements)`, each `OR`
-    /// alternative a `Gem::Requirement` of its `,`-separated parts).
-    fn specs_matching(&self, package: &Package, constraint: &Constraint) -> bool {
+    /// `filter_matching_specs(@all_specs[name], requirements)`: the gem's
+    /// builds, for any platform, that satisfy the constraint as Bundler
+    /// reads it back from its string, each `OR` alternative a
+    /// `Gem::Requirement` of its `,`-separated parts, those of each in turn.
+    fn specs_matching_other_platforms(
+        &self,
+        package: &Package,
+        constraint: &Constraint,
+    ) -> Vec<Spec> {
         let Package::Name(PackageName::Gem(name)) = package else {
-            return false;
+            return Vec::new();
         };
-        let requirements: Vec<Requirement> = constraint
+        let all = self.provider.all_specs(name);
+        constraint
             .constraint_string()
             .split(" OR ")
             .filter_map(|req| Requirement::new(req.split(',').map(str::trim)).ok())
-            .collect();
-        self.provider.all_specs(name).iter().any(|spec| {
-            requirements
-                .iter()
-                .any(|requirement| requirement.satisfied_by(&spec.version))
-        })
+            .flat_map(|requirement| {
+                all.iter()
+                    .filter(|spec| requirement.satisfied_by(&spec.version))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
+}
+
+/// What `find_names_to_relax` found: the gems to unlock and those to let
+/// prereleases in for, each once in the order first met, and the last
+/// extended explanation met.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct NamesToRelax {
+    pub(super) unlock: Vec<String>,
+    pub(super) prereleases: Vec<PackageName>,
+    pub(super) extended_explanation: Option<String>,
+}
+
+impl NamesToRelax {
+    /// As `relax_hook.rb` logs Bundler's: `{"unlock":[...],"pre":[...]}`,
+    /// names as Bundler spells them.
+    pub(super) fn to_json(&self) -> String {
+        let pre: Vec<String> = self
+            .prereleases
+            .iter()
+            .map(PackageName::bundler_name)
+            .collect();
+        format!(
+            "{{\"unlock\":{},\"pre\":{}}}",
+            serde_json::Value::from(self.unlock.clone()),
+            serde_json::Value::from(pre)
+        )
+    }
+}
+
+/// `Resolver#find_names_to_relax`: from the failure, while it is a
+/// conflict's, step to the incompatibility being resolved
+/// (`cause.incompatibility`, never the satisfier's) and look at each of its
+/// terms: a gem with a base requirement is to be unlocked, and a package
+/// whose prereleases are left out but that has some is to let them in. A
+/// `NoVersions` incompatibility among the conflict's two causes gives its
+/// extended explanation. Bundler's third list, gems to look for remotely,
+/// has no counterpart: Spinel has no local-only resolution.
+pub(super) fn find_names_to_relax(
+    provider: &Provider<'_>,
+    incompatibility: &Rc<Incompatibility<Package, Candidate>>,
+) -> NamesToRelax {
+    let mut names = NamesToRelax::default();
+    let mut incompatibility = incompatibility;
+    while let Cause::Conflict {
+        incompatibility: cause_incompatibility,
+        satisfier,
+    } = incompatibility.cause()
+    {
+        incompatibility = cause_incompatibility;
+        for term in incompatibility.terms() {
+            if let Package::Name(name) = term.package() {
+                if let Some(gem) = provider.base_requirement_name(name) {
+                    if !names.unlock.contains(&gem) {
+                        names.unlock.push(gem);
+                    }
+                } else if provider.ignores_prereleases(name)
+                    && provider.has_prereleases(name)
+                    && !names.prereleases.contains(name)
+                {
+                    names.prereleases.push(name.clone());
+                }
+            }
+            let no_versions = [incompatibility, satisfier]
+                .into_iter()
+                .find(|incompat| matches!(incompat.cause(), Cause::NoVersions(_)));
+            if let Some(no_versions) = no_versions {
+                names.extended_explanation = no_versions.extended_explanation().map(str::to_owned);
+            }
+        }
+    }
+    names
 }
 
 /// `[matching_versions.count <= 1 ? 0 : 1, higher_versions.count]`.

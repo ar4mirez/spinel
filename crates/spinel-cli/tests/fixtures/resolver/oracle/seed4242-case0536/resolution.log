@@ -67,3 +67,42 @@ conflict: every version of g0 depends on g4 >= 2.0.a
 ! g0 >= 0 is satisfied by g0 >= 0
 ! which is caused by Gemfile depends on g0 >= 0
 ! thus version solving has failed
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: Gemfile depends on g1 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g1 >= 0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 1.1
+fact: every version of g0 depends on g1 ~> 2.0.a
+fact: every version of g0 depends on g4 >= 2.0.a
+selected g0 1.1
+derived: g4 >= 2.0.a
+derived: g1 ~> 2.0.a
+attempting g1 2.0
+fact: g1 >= 2.0 depends on g3 < 2.0.beta
+selected g1 2.0
+derived: g3 < 2.0.beta
+attempting g3 1.0
+fact: g3 < 2.0 depends on g4 < 2
+selected g3 1.0
+derived: g4 < 2
+attempting g4 2.0.a
+selected g4 2.0.a
+Solution found after 1 attempts:
+* RubyGems 4.0.16
+* Ruby 4.0.0
+* g0 1.1
+* g1 2.0
+* g3 1.0
+* g4 2.0.a

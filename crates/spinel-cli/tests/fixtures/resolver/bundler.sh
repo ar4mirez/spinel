@@ -12,8 +12,10 @@
 # `bundler_oracle.rb` makes Bundler see as its own. `bundle lock` writes
 # `Gemfile.lock` there, its remote spelled `@SOURCE@`; a case Bundler cannot
 # resolve gets `bundler.txt` instead, Bundler's explanation, which the PR
-# shows beside Spinel's. `crates/spinel-cli/tests/resolver.rs` compares
-# Spinel's resolution of each case with these.
+# shows beside Spinel's. A case Bundler retried also gets `relax.log`, what
+# each try's `find_names_to_relax` returned, as `relax_hook.rb` logs it.
+# `crates/spinel-cli/tests/resolver.rs` compares Spinel's resolution of each
+# case with these.
 #
 # Written with Bundler 4.0.20 on Ruby 4.0.9; Python 3 serves the files.
 
@@ -43,7 +45,7 @@ for dir in "$here"/cases/*/; do
   name="$(basename "$dir")"
   platforms="$(sed -n 's/^platforms=//p' "$dir/case.env")"
   read -r -a platform_list <<<"$platforms"
-  rm -f "$dir/Gemfile.lock" "$dir/bundler.txt"
+  rm -f "$dir/Gemfile.lock" "$dir/bundler.txt" "$dir/relax.log"
   mkdir -p "$work/$name"
   cp "$dir/Gemfile" "$work/$name/Gemfile"
   extra=()
@@ -60,7 +62,8 @@ for dir in "$here"/cases/*/; do
       ORACLE_PLATFORM="${platform_list[0]}" \
       ORACLE_RUBY="$(sed -n 's/^ruby=//p' "$dir/case.env")" \
       ORACLE_RUBYGEMS="$(sed -n 's/^rubygems=//p' "$dir/case.env")" \
-      RUBYOPT="-r$here/bundler_oracle.rb" \
+      RUBYOPT="-r$here/bundler_oracle.rb -r$here/relax_hook.rb" \
+      RELAX_LOG="$dir/relax.log" \
       bundle lock "${extra[@]}" >"$work/$name/out.txt" 2>&1
   ); then
     sed "s|$source_url|@SOURCE@|g" "$work/$name/Gemfile.lock" >"$dir/Gemfile.lock"

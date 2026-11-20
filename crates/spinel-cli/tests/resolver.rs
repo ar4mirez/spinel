@@ -86,6 +86,11 @@ fn resolve(name: &str, source: &str) -> Output {
 
 /// [`resolve`], with more arguments to `spinel resolve`.
 fn resolve_with(name: &str, source: &str, args: &[&str]) -> Output {
+    resolve_with_env(name, source, args, &[])
+}
+
+/// [`resolve_with`], with more variables in `spinel resolve`'s environment.
+fn resolve_with_env(name: &str, source: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
     let case = fixtures().join("cases").join(name);
     let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shims/gemfile_eval.rb");
     let eval = Command::new(SPINEL)
@@ -116,6 +121,7 @@ fn resolve_with(name: &str, source: &str, args: &[&str]) -> Output {
         .arg("--rubygems-version")
         .arg(setting(&case, "rubygems"))
         .env("SPINEL_HOME", &home)
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -270,9 +276,9 @@ fn reports_a_gem_not_found_as_bundler_does() {
 
 /// The port of Bundler's pubgrub-ruby (#816), behind `--solver
 /// pubgrub-ruby` until it is the only solver, resolves every case that
-/// resolves as Bundler does: Bundler's first try decides each, so the
-/// retries the port does not make yet are not needed. Each case that does
-/// not resolve fails on it too; its explanation is not Bundler's yet.
+/// resolves as Bundler does. Each case that does not resolve fails on it
+/// too, after retrying with the prereleases Bundler retries with; its
+/// explanation is not Bundler's yet.
 #[test]
 fn the_pubgrub_ruby_port_resolves_as_bundler_does() {
     let port = ["--solver", "pubgrub-ruby"];
@@ -293,11 +299,25 @@ fn the_pubgrub_ruby_port_resolves_as_bundler_does() {
         "conflict_three",
         "conflict_transitive",
     ] {
-        let out = resolve_with(name, &source, &port);
+        let out = resolve_with_env(name, &source, &port, &[("SPINEL_DEBUG_RELAX", "1")]);
         assert_eq!(out.status.code(), Some(1), "{name}: should not resolve");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.starts_with("Could not find compatible versions\n"),
+        // `SPINEL_DEBUG_RELAX` prints what each try relaxed, as
+        // `relax_hook.rb` logs Bundler's (`relax.log`, by `bundler.sh`).
+        let relaxed: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("find_names_to_relax: "))
+            .collect();
+        let bundler =
+            fs::read_to_string(fixtures().join("cases").join(name).join("relax.log")).unwrap();
+        assert_eq!(relaxed, bundler.lines().collect::<Vec<_>>(), "{name}");
+        let explanation: Vec<&str> = stderr
+            .lines()
+            .filter(|line| !line.starts_with("find_names_to_relax: "))
+            .collect();
+        assert_eq!(
+            explanation.first(),
+            Some(&"Could not find compatible versions"),
             "{name}: {stderr}"
         );
     }
