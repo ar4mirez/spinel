@@ -1368,10 +1368,12 @@ impl<'a> Provider<'a> {
     /// of a single term: pubgrub-ruby learns nothing there, but backtracks and
     /// propagates that term, so what pubgrub-rs learned it from is on
     /// Bundler's first-cause chain. That can name a gem Bundler's chain does
-    /// not: `tests/fixtures/resolver/oracle/case0138`, where Spinel resolves
-    /// with a prerelease of `g2` and Bundler reports the conflict (#816).
-    /// Without it, `needs_pre`, `case1` and 40 of those 400 indexes that
-    /// Bundler resolves would fail.
+    /// not, and pubgrub-rs and pubgrub-ruby can learn different facts on the
+    /// way: these are the known differences, tested as `known_difference_*`
+    /// over the cases in `tests/fixtures/resolver/oracle/` (#816). In
+    /// `case0138`, for one, Spinel resolves with a prerelease of `g2` where
+    /// Bundler reports the conflict. Without that walk, `needs_pre`, `case1`
+    /// and 40 of the 400 seed 1 indexes that Bundler resolves would fail.
     fn names_to_relax(
         &self,
         tree: &DerivationTree<Package, VersionSet, String>,
