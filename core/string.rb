@@ -421,9 +421,10 @@ class String
     __splice__(0, bytesize, "")
   end
 
-  # `<<` with a String that can be appended as it stands is the primitive's.
-  # An Integer code point, what needs `to_str`, a frozen or chilled receiver, and two
-  # encodings that have to be reconciled come here.
+  # `<<` with a String that can be appended as it stands, or an Integer that
+  # is one byte of the receiver's encoding as it stands, is the primitive's.
+  # Any other Integer code point, what needs `to_str`, a frozen or chilled
+  # receiver, and two encodings that have to be reconciled come here.
   def __append__(other)
     __modify__
     return __append_codepoint__(other) if other.is_a?(Integer)

@@ -213,7 +213,8 @@ pub enum Native {
     Chill,
     /// `String#<<` for the case every loop that builds a String is in: an
     /// unfrozen, unchilled receiver and a String argument whose bytes can be appended
-    /// as they are. Anything else is the Ruby half's, the method named here:
+    /// as they are, or, for `<<` only, an Integer that is one byte of the
+    /// receiver's encoding as it stands (#879). Anything else is the Ruby half's, the method named here:
     /// `String#__append__` for `<<`, and for `__append_as_string__`, which
     /// `Array#inspect` appends with, `String#__append_as_string_rest__`.
     StringAppend(&'static str),
