@@ -74,7 +74,36 @@ backends.each do |backend|
   s.register(files[1], :r).value = :file1_again
   p [backend, :files_again, s.select(0).map(&name)]
 
+  # A descriptor closed and taken by a new IO, with the same interests,
+  # between two runs: a watcher started on it goes to the backend again
+  # (`EV__IOFDSET`), so epoll watches the new IO.
+  old_r, old_w = IO.pipe
+  old_w.write("a")
+  s.register(old_r, :r).value = :old
+  p [backend, :before_reuse, s.select(0).map(&name)]
+  fd = old_r.fileno
+  s.deregister(old_r)
+  old_r.close
+  new_r, new_w = IO.pipe
+  s.register(new_r, :r).value = :reused
+  new_w.write("b")
+  p [backend, :reused, new_r.fileno == fd, s.select(0).map(&name)]
+
+  # A regular file's descriptor, which epoll refused, taken by a pipe that
+  # is not ready, then is.
+  file = File.open(__FILE__)
+  s.register(file, :r).value = :file
+  p [backend, :before_file_reuse, s.select(0).map(&name)]
+  fd = file.fileno
+  s.deregister(file)
+  file.close
+  pipe_r, pipe_w = IO.pipe
+  s.register(pipe_r, :r).value = :pipe
+  p [backend, :file_reused, pipe_r.fileno == fd, s.select(0).map(&name)]
+  pipe_w.write("c")
+  p [backend, :file_reused_ready, s.select(0).map(&name)]
+
   s.close
   dup.autoclose = false
-  (pipes.flatten + [r, w] + files).each(&:close)
+  (pipes.flatten + [r, w] + files + [old_w, new_r, new_w, pipe_r, pipe_w]).each(&:close)
 end

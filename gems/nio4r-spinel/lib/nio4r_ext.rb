@@ -177,6 +177,9 @@ module NIO
       # descriptors in `polls` slot order.
       @__changes__ = []
       @__reified__ = {}
+      # The descriptors a watcher started on since the last run, which
+      # `fd_reify` gives the backend again (`EV__IOFDSET`).
+      @__iofdset__ = {}
       # Whether epoll's kernel state is to be made again on the next run.
       @__postfork__ = false
       @__slots__ = []
@@ -282,6 +285,7 @@ module NIO
         end
       else
         @__changes__ << fd unless @__changes__.include?(fd)
+        @__iofdset__[fd] = true unless mask.zero?
       end
       if monitors.empty?
         @__fds__.delete(fd)
@@ -301,23 +305,26 @@ module NIO
     end
 
     # fd_reify: each changed descriptor whose interests differ from what the
-    # backend was last given goes through the backend's modify.
+    # backend was last given, or with a watcher started on it, goes through
+    # the backend's modify.
     def __reify__
       __rearm__ if @__postfork__
       queue = @__state__[0]
       @__changes__.each do |fd|
         old = @__reified__.fetch(fd, 0)
         new = __wanted__(fd)
-        next if old == new
+        next if old == new && !@__iofdset__.delete(fd)
         new.zero? ? @__reified__.delete(fd) : @__reified__[fd] = new
         queue ? __epoll_modify__(queue, fd, old, new) : __poll_modify__(fd, old, new)
       end
       @__changes__.clear
+      @__iofdset__.clear
     end
 
     # poll_modify: a new descriptor takes the next slot of `polls`, and a
     # removed one's slot goes to the last.
     def __poll_modify__(fd, old, new)
+      return if old == new
       if new.zero?
         idx = @__slots__.index(fd)
         last = @__slots__.pop
@@ -471,6 +478,7 @@ module NIO
     # since it was fed; the count of monitors.
     def __invoke__(pending, ready)
       count = 0
+      outer = @__stopped__
       @__stopped__ = {}
       pending.each do |monitor, revents|
         next if @__stopped__.key?(monitor)
@@ -484,7 +492,8 @@ module NIO
       end
       count
     ensure
-      @__stopped__ = nil
+      outer&.merge!(@__stopped__)
+      @__stopped__ = outer
     end
 
     # epoll_poll's walk of `epoll_eperms` from the last: one still marked and
