@@ -126,13 +126,81 @@ enum Inst {
     Unicode {
         otherwise: usize,
     },
+    /// A greedy `x{min,max}` whose `x` is one character: as many as it can
+    /// take, then one fewer at a time on backtracking, down to `min`. Onigmo's
+    /// `OP_ANYCHAR_STAR` and its kin, which run a loop of one character
+    /// without the loop's machinery — the `Split`, `Mark`, `Progress` and
+    /// `Jump` a [`Compiler::star`] goes round per character, which were half
+    /// the time the log line in `bench/regex_captures.rs` took, #243. One
+    /// character always moves, so the empty check has nothing to stop.
+    Run {
+        one: One,
+        min: u32,
+        max: Option<u32>,
+    },
+}
+
+/// What [`Inst::Run`] repeats: the instruction it was, matching one character.
+#[derive(Debug, Clone, Copy)]
+enum One {
+    Char { ch: char, icase: bool },
+    Class(u32),
+    Any { nl: bool },
+}
+
+/// A class as a program holds it.
+struct ClassInst {
+    class: Class,
+    /// The one character it folds as under `/i`, if any.
+    only: Option<char>,
+    /// Which ASCII characters it holds, bit `c` for `c`, when that is the
+    /// same in every encoding: when nothing in it folds case, because every
+    /// encoding reads a byte below `0x80` as that ASCII character and every
+    /// class answers an ASCII character by Unicode's rules. The usual subject
+    /// is mostly ASCII, and a lookup here is what the walk through the items
+    /// and their shorthands cost per character — a quarter of the log line in
+    /// `bench/regex_captures.rs`, #243.
+    ascii: Option<u128>,
+}
+
+impl ClassInst {
+    fn new(class: &Class) -> ClassInst {
+        let ascii = (!folds_case(class)).then(|| {
+            (0u8..0x80)
+                .filter(|&b| class_matches(class, char::from(b), Encoding::Utf8))
+                .fold(0u128, |table, b| table | 1 << b)
+        });
+        ClassInst {
+            class: class.clone(),
+            only: folds_as_literal(class),
+            ascii,
+        }
+    }
+
+    fn holds(&self, c: char, enc: Encoding) -> bool {
+        match self.ascii {
+            Some(table) if c.is_ascii() => table >> u32::from(c) & 1 == 1,
+            _ => class_holds(&self.class, self.only, c, enc),
+        }
+    }
+}
+
+/// Whether anything in `class`, nested and intersected classes too, folds
+/// case: under `/i` an ASCII character can match one past ASCII, `k` and
+/// the Kelvin sign, in some encodings and not others.
+fn folds_case(class: &Class) -> bool {
+    class.icase
+        || class.intersect.iter().any(folds_case)
+        || class.items.iter().any(|item| match item {
+            ClassItem::Nested(inner) => folds_case(inner),
+            _ => false,
+        })
 }
 
 /// A compiled pattern.
 pub struct Program {
     insts: Vec<Inst>,
-    /// Each class, with the one character it folds as under `/i`, if any.
-    classes: Vec<(Class, Option<char>)>,
+    classes: Vec<ClassInst>,
     pub groups: usize,
     marks: usize,
     /// Whether the run keeps a [`Event`] history: a pattern with a call does,
@@ -418,10 +486,29 @@ fn behind_width(ast: &Ast) -> (Option<usize>, bool) {
     }
 }
 
+/// Whether `ast` compiles to one [`Inst::Char`], [`Inst::Class`] or
+/// [`Inst::Any`] and nothing else, which is what [`Inst::Run`] repeats: not a
+/// character that folds to several under `/i`, nor a class that also matches
+/// such a string, which [`Compiler::string`] and [`Compiler::class`] write as
+/// alternatives.
+fn one_char(ast: &Ast) -> bool {
+    match ast {
+        Ast::Literal { ch, icase, .. } => !*icase || fold::one_to_one(&[*ch]),
+        Ast::Any { .. } => true,
+        Ast::Class(class) => {
+            !folds_as_literal(class).is_some_and(|only| !fold::one_to_one(&[only]))
+                && longer_strings(class).is_empty()
+        }
+        Ast::Group {
+            index: None, body, ..
+        } => one_char(body),
+        _ => false,
+    }
+}
+
 struct Compiler {
     insts: Vec<Inst>,
-    /// Each class, with the one character it folds as under `/i`, if any.
-    classes: Vec<(Class, Option<char>)>,
+    classes: Vec<ClassInst>,
     marks: usize,
     /// The groups a call names, which compile as subroutines.
     called: Vec<usize>,
@@ -567,6 +654,20 @@ impl Compiler {
                     |c| c.string_repeat(&text, *min, *max, *greedy),
                     |c| c.repeat(&mut |c| c.node(body), *min, *max, *greedy),
                 )?,
+                _ if *greedy && max.is_none_or(|max| max >= *min) && one_char(body) => {
+                    self.node(body)?;
+                    let one = match self.insts.pop() {
+                        Some(Inst::Char { ch, icase }) => One::Char { ch, icase },
+                        Some(Inst::Class(index)) => One::Class(index),
+                        Some(Inst::Any { nl }) => One::Any { nl },
+                        other => unreachable!("one character compiled to {other:?}"),
+                    };
+                    self.emit(Inst::Run {
+                        one,
+                        min: *min,
+                        max: *max,
+                    });
+                }
                 _ => self.repeat(&mut |c| c.node(body), *min, *max, *greedy)?,
             },
             Ast::Atomic(body) => {
@@ -755,7 +856,7 @@ impl Compiler {
         }
         let index = u32::try_from(self.classes.len())
             .map_err(|_| Error::Syntax("too many character classes".into()))?;
-        self.classes.push((class.clone(), folds_as_literal(class)));
+        self.classes.push(ClassInst::new(class));
         let longer = longer_strings(class);
         if longer.is_empty() {
             self.emit(Inst::Class(index));
@@ -882,6 +983,11 @@ struct Backtrack {
     frames: Frames,
     /// How long the [`Event`] history was, which is as long as it is again.
     history: usize,
+    /// An [`Inst::Run`]'s point: `sp` is the end of the run being tried, and
+    /// coming back gives back one character, down to this. The point stays on
+    /// the stack until the run is back to it, so a run of `n` characters is
+    /// one point rather than `n`.
+    floor: Option<usize>,
 }
 
 /// Each loop mark a path overwrote, with what it held before, newest last.
@@ -1133,13 +1239,48 @@ impl Program {
                         _ => false,
                     },
                     Inst::Class(index) => {
-                        let (class, only) = &self.classes[*index as usize];
+                        let class = &self.classes[*index as usize];
                         match haystack.next_char(sp) {
-                            Some((c, width)) if class_holds(class, *only, c, haystack.enc) => {
+                            Some((c, width)) if class.holds(c, haystack.enc) => {
                                 sp += width;
                                 true
                             }
                             _ => false,
+                        }
+                    }
+                    Inst::Run { one, min, max } => {
+                        let min = *min as usize;
+                        let max = max.map_or(usize::MAX, |max| max as usize);
+                        let mut count = 0;
+                        let mut floor = sp;
+                        while count < max {
+                            let Some(width) = self.one_at(*one, haystack, sp) else {
+                                break;
+                            };
+                            ctx.step()?;
+                            sp += width;
+                            count += 1;
+                            if count == min {
+                                floor = sp;
+                            }
+                        }
+                        if count < min {
+                            false
+                        } else {
+                            if count > min {
+                                self.give_back(
+                                    haystack,
+                                    &mut stack,
+                                    floor,
+                                    sp,
+                                    pc + 1,
+                                    &saves,
+                                    &trail,
+                                    &frames,
+                                    ctx,
+                                );
+                            }
+                            true
                         }
                     }
                     Inst::Anchor(a) => anchor_holds(*a, haystack, sp, anchor),
@@ -1246,6 +1387,7 @@ impl Program {
                                         trail: trail.len(),
                                         frames: frames.clone(),
                                         history: ctx.history.len(),
+                                        floor: None,
                                     });
                                 }
                                 sp = longest;
@@ -1337,6 +1479,7 @@ impl Program {
                             trail: trail.len(),
                             frames: frames.clone(),
                             history: ctx.history.len(),
+                            floor: None,
                         });
                         pc = *prefer;
                         continue;
@@ -1462,6 +1605,27 @@ impl Program {
 
             // The current path died. Take the most recent alternative.
             if failed {
+                // A run's point gives back a character and stays, until it is
+                // back to its floor.
+                if let Some(top) = stack.last_mut()
+                    && let Some(floor) = top.floor
+                {
+                    let back = run_back(haystack, floor, top.sp);
+                    top.sp = back;
+                    pc = top.pc;
+                    sp = back;
+                    saves = Rc::clone(&top.saves);
+                    frames.clone_from(&top.frames);
+                    let (at, history) = (top.trail, top.history);
+                    if back <= floor {
+                        stack.pop();
+                    }
+                    for (slot, old) in trail.drain(at..).rev() {
+                        marks[slot] = old;
+                    }
+                    ctx.history.truncate(history);
+                    continue;
+                }
                 match stack.pop() {
                     Some(entry) => {
                         pc = entry.pc;
@@ -1479,6 +1643,57 @@ impl Program {
                     }
                 }
             }
+        }
+    }
+
+    /// The width of the character at `sp`, if `one` matches it.
+    fn one_at(&self, one: One, haystack: Subject<'_>, sp: usize) -> Option<usize> {
+        let (c, width) = haystack.next_char(sp)?;
+        let held = match one {
+            One::Char { ch, icase } => chars_equal(c, ch, icase, haystack.enc, Fold::Literal),
+            One::Any { nl } => nl || c != '\n',
+            One::Class(index) => self.classes[index as usize].holds(c, haystack.enc),
+        };
+        held.then_some(width)
+    }
+
+    /// The points an [`Inst::Run`] that took `floor..end` comes back to, each
+    /// one character shorter, to carry on at `pc`: one point that gives a
+    /// character back each time, where the encoding steps back cheaply. In the
+    /// multibyte encodings stepping back reads forward from the last byte that
+    /// can only start a character, which in a long run of them is the run's
+    /// start, so there each place gets a point of its own, as a loop's
+    /// `Split`s would have pushed.
+    #[allow(clippy::too_many_arguments)]
+    fn give_back(
+        &self,
+        haystack: Subject<'_>,
+        stack: &mut Vec<Backtrack>,
+        floor: usize,
+        end: usize,
+        pc: usize,
+        saves: &Saves,
+        trail: &Trail,
+        frames: &Frames,
+        ctx: &Ctx,
+    ) {
+        let point = |sp, floor| Backtrack {
+            pc,
+            sp,
+            saves: Rc::clone(saves),
+            trail: trail.len(),
+            frames: frames.clone(),
+            history: ctx.history.len(),
+            floor,
+        };
+        if !haystack.enc.multibyte_coded() {
+            stack.push(point(end, Some(floor)));
+            return;
+        }
+        let mut at = floor;
+        while at < end {
+            stack.push(point(at, None));
+            at += haystack.next_char(at).map_or(1, |(_, width)| width);
         }
     }
 
@@ -1609,6 +1824,30 @@ impl Program {
             };
         }
         Ok((points, leaked))
+    }
+}
+
+/// Where the character before `end` starts, in a run [`Inst::Run`] read
+/// forward from `floor`: a step back, checked against the width read forward,
+/// because a byte of broken UTF-8 reads forward as one character and a stray
+/// continuation byte steps back past it. When they disagree, the run is read
+/// forward again from `floor`.
+fn run_back(haystack: Subject<'_>, floor: usize, end: usize) -> usize {
+    let back = haystack.enc.char_start_before(haystack.bytes, end);
+    if back >= floor
+        && haystack
+            .next_char(back)
+            .is_some_and(|(_, width)| back + width == end)
+    {
+        return back;
+    }
+    let mut at = floor;
+    loop {
+        let next = at + haystack.next_char(at).map_or(1, |(_, width)| width);
+        if next >= end {
+            return at;
+        }
+        at = next;
     }
 }
 
