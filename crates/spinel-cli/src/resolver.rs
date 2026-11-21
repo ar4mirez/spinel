@@ -179,11 +179,9 @@ fn ruby_split(s: &str, sep: char) -> Vec<&str> {
 /// `/info/<gem>`, as `Gem::Resolver::APISet::GemParser` reads each line after
 /// the `---` header: `version[-platform] dep:req&req,dep:req|key:value,...`.
 /// Of the keys, `ruby`, `rubygems` and `checksum` are read; `created_at` is
-/// Bundler's cooldown's. Each value is split on `&` as `GemParser` does, with
-/// Ruby's `split`, so an empty value (`rubygems:`, served by rubygems.org for
-/// `archive-tar-minitar` 0.5.1) is `[]`: `Gem::Requirement.new([])`, `>= 0`,
-/// for a requirement, and no checksum, as `Bundler::EndpointSpecification
-/// #parse_metadata` reads `checksum` as the last part.
+/// Bundler's cooldown's. Each requirement is split on `&` as `GemParser` does,
+/// with Ruby's `split`, so an empty one (`rubygems:`, served by rubygems.org
+/// for `archive-tar-minitar` 0.5.1) is `[]`: `Gem::Requirement.new([])`, `>= 0`.
 pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>, InfoError> {
     let text = String::from_utf8_lossy(data);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -236,12 +234,12 @@ pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>,
             let Some((key, value)) = field.split_once(':') else {
                 continue;
             };
-            let parts = ruby_split(value, '&');
-            let read = || Requirement::new(parts.iter().copied()).map_err(|e| error(e.to_string()));
+            let read =
+                || Requirement::new(ruby_split(value, '&')).map_err(|e| error(e.to_string()));
             match key {
                 "ruby" => spec.required_ruby_version = read()?,
                 "rubygems" => spec.required_rubygems_version = read()?,
-                "checksum" => spec.checksum = parts.last().map(|sum| (*sum).to_owned()),
+                "checksum" => spec.checksum = Some(value.to_owned()),
                 _ => {}
             }
         }

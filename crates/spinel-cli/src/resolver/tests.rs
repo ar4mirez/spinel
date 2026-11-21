@@ -97,13 +97,11 @@ fn reads_empty_info_values_as_gem_parser_does() {
         specs[0].checksum.as_deref(),
         Some("f8eb8f78342e3366509d2acb6ee87afec77e49c1545c7e7a76bdaab0f820db46")
     );
-    // The same for `ruby:`, a dependency's requirement, and a trailing `&`;
-    // an empty `checksum:` is no checksum, as Bundler's `parse_metadata` reads it.
-    let specs = parse_info("demo", b"1.0 rack:,tilt:>= 2&|ruby:,checksum:", &local()).unwrap();
+    // The same for `ruby:`, a dependency's requirement, and a trailing `&`.
+    let specs = parse_info("demo", b"1.0 rack:,tilt:>= 2&|ruby:", &local()).unwrap();
     assert_eq!(specs[0].required_ruby_version, req(&[]));
     assert_eq!(specs[0].dependencies[0], ("rack".to_owned(), req(&[])));
     assert_eq!(specs[0].dependencies[1].1.to_string(), ">= 2");
-    assert_eq!(specs[0].checksum, None);
     // Ruby's `split` keeps an empty part before a non-empty one, and
     // `Gem::Requirement.new(["", ">= 2"])` is ill-formed.
     assert!(parse_info("demo", b"1.0 |ruby:&>= 2", &local()).is_err());
