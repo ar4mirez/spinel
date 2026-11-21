@@ -637,11 +637,7 @@ fn select_hands_ready_monitors_over_in_libevs_order() {
         "order.rb",
         &fs::read_to_string(fixture().join("order.rb")).unwrap(),
     );
-    let out = sandbox
-        .spinel()
-        .args(["run", "order.rb"])
-        .output()
-        .unwrap();
+    let out = sandbox.spinel().args(["run", "order.rb"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert_eq!(
         ok(&out, "spinel run order.rb"),
