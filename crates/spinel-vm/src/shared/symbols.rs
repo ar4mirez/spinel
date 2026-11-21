@@ -130,6 +130,29 @@ pub fn class_id_ivar() -> SymbolId {
 /// reading without a second copy of the string.
 pub const CLASS_ID_IVAR: &str = "@__id__";
 
+/// The ids of [`ALWAYS_PRIVATE`], memoised as [`class_id_ivar`] is: every
+/// method definition asks whether its name is one of them (#652).
+///
+/// Interning the five names on each ask was most of the bootstrap under
+/// Miri — 562 primitives defined, five interns each, against about 800 for
+/// everything else the bootstrap names — and five read locks and hashes per
+/// `def` natively.
+#[must_use]
+pub fn always_private() -> &'static [SymbolId; 5] {
+    static IDS: OnceLock<[SymbolId; 5]> = OnceLock::new();
+    IDS.get_or_init(|| ALWAYS_PRIVATE.map(intern))
+}
+
+/// The method names Ruby makes private on definition, whatever the scope's
+/// default visibility: `rb_method_entry_make`'s list.
+pub const ALWAYS_PRIVATE: [&str; 5] = [
+    "initialize",
+    "initialize_copy",
+    "initialize_clone",
+    "initialize_dup",
+    "respond_to_missing?",
+];
+
 /// The name `id` was interned under, or `None` if it was never interned.
 ///
 /// Returns an owned `String` rather than a borrow: the table is behind a lock,
@@ -197,6 +220,13 @@ mod tests {
     #[test]
     fn distinct_names_get_distinct_ids() {
         assert_ne!(intern("alpha_sym"), intern("beta_sym"));
+    }
+
+    #[test]
+    fn the_always_private_memo_is_what_interning_answers() {
+        let memo = always_private();
+        assert_eq!(*memo, ALWAYS_PRIVATE.map(intern));
+        assert!(!memo.contains(&intern("initialize_copies")));
     }
 
     #[test]

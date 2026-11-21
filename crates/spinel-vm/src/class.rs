@@ -177,15 +177,7 @@ struct Refinement {
 
 /// The names Ruby makes private on definition, whatever the scope's default.
 fn is_always_private(name: SymbolId) -> bool {
-    [
-        "initialize",
-        "initialize_copy",
-        "initialize_clone",
-        "initialize_dup",
-        "respond_to_missing?",
-    ]
-    .into_iter()
-    .any(|private| crate::shared::symbols::intern(private) == name)
+    crate::shared::symbols::always_private().contains(&name)
 }
 
 /// Whether `include` accepts it, and whether it can have a superclass.
