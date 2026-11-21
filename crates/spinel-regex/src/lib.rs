@@ -1178,6 +1178,43 @@ mod tests {
         assert_eq!(find("<.+?>", "<a><b>"), Some((0, 3)));
     }
 
+    /// A greedy repeat of one character takes its whole run and gives it back
+    /// a character at a time, down to its minimum (#243). Measured on ruby
+    /// 4.0.10.
+    #[test]
+    fn a_run_of_one_character_gives_back_one_at_a_time() {
+        assert_eq!(find("a*ab", "aaab"), Some((0, 4)));
+        assert_eq!(find("\\d{2,4}5", "123456"), Some((0, 5)));
+        assert_eq!(find("a{0,2}a", "xaaay"), Some((1, 4)));
+        assert_eq!(find("a{2}", "aaa"), Some((0, 2)));
+        assert_eq!(find("(?:a)+b", "ab"), Some((0, 2)));
+        assert_eq!(find("a{2,}b", "ab"), None);
+        assert_eq!(find("[^\\]]+\\]x", "a]b]x"), Some((2, 5)));
+        let re = Regex::new("(a+)(a)", Flags::default()).expect("compiles");
+        let caps = re.find_at("aaa", 0).expect("runs").expect("matches");
+        assert_eq!((caps.group(1), caps.group(2)), (Some((0, 2)), Some((2, 3))));
+        // Under `/i` an ASCII class still folds: `[a]+` takes `"Aa"`.
+        assert_eq!(find("(?i)[a]+", "AaB"), Some((0, 2)));
+        // In Shift_JIS a trail byte can be an `a`: giving back steps over a
+        // whole character, never into one.
+        let plain = Flags::default();
+        assert_eq!(find_in(".*ab", plain, Encoding::ShiftJis, b"\x82ab"), None);
+        assert_eq!(
+            find_in(".*ab", plain, Encoding::ShiftJis, b"\x82aab"),
+            Some((0, 4))
+        );
+        assert_eq!(
+            find_in(".+.b", plain, Encoding::ShiftJis, b"\x82\xa0\x82\xa0b"),
+            Some((0, 5))
+        );
+        // The VM never hands over broken UTF-8, but the engine reads a stray
+        // continuation byte forward as a character of its own, and giving
+        // back over it lands where reading forward did.
+        let broken = Regex::new("\\A.+.ya", Flags::default()).expect("compiles");
+        let found = broken.find_in(b"x\x80ya", 0, Encoding::Utf8).expect("runs");
+        assert_eq!(found.and_then(|c| c.group(0)), Some((0, 4)));
+    }
+
     #[test]
     fn backreference_matches_what_the_group_took() {
         assert_eq!(find("(ab)\\1", "abab"), Some((0, 4)));
