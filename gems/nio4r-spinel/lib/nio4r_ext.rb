@@ -161,13 +161,28 @@ module NIO
       @__backend__ = backend
       @__closed__ = false
       @__wakeup_fired__ = false
-      # The descriptors watched: each one's monitors, and the interests the
-      # queue has for it.
+      # The descriptors watched: each one's monitors, and, on kqueue, the
+      # interests the queue has for it.
       @__fds__ = {}
       @__watched__ = {}
-      # The descriptors epoll refuses, such as regular files', which libev
-      # keeps in `epoll_eperms` and reports ready on every run.
-      @__eperms__ = {}
+      # epoll's: what the kernel was last given for each descriptor (libev's
+      # `emask`, EPERM_MASK for one it refused); and the descriptors it
+      # refuses, such as regular files', in libev's `epoll_eperms` order,
+      # reported ready on every run.
+      @__emasks__ = {}
+      @__eperms__ = []
+      # libev's `fd_reify`, on the poll backends and epoll: the descriptors
+      # changed since the last run, in `fdchanges` order; the interests the
+      # backend was last given for each (`anfd->events`); and, on poll, the
+      # descriptors in `polls` slot order.
+      @__changes__ = []
+      @__reified__ = {}
+      # Whether epoll's kernel state is to be made again on the next run.
+      @__postfork__ = false
+      @__slots__ = []
+      # Monitors whose watcher stopped while a run handed events over, which
+      # `ev_io_stop`'s `clear_pending` takes off the pending queue.
+      @__stopped__ = nil
       # Each descriptor's generation, which the queue holds beside it, as
       # libev's `egen`: a registration with another is a stray.
       @__gens__ = Hash.new(0)
@@ -247,28 +262,26 @@ module NIO
 
     # What a monitor asks of its selector's loop: `monitor` on `fd` with
     # the interests `mask` (0 for none), as `ev_io_start` and `ev_io_stop`.
+    # Each call stops the monitor's watcher, if it was started, and starts it
+    # again with `mask`, so it goes to the head of the descriptor's watcher
+    # list (`wlist_add`): `@__fds__[fd]` keeps them oldest first. The backend
+    # is told on the next run (`fd_change`), except kqueue, told at once.
     def __watch__(monitor, fd, mask)
       return if @__closed__
-      monitors = @__fds__.fetch(fd, {}).merge(monitor => mask)
-      monitors.delete(monitor) if mask.zero?
+      @__stopped__[monitor] = true if @__stopped__
+      monitors = @__fds__.fetch(fd, {}).dup
+      monitors.delete(monitor)
+      monitors[monitor] = mask unless mask.zero?
       queue = @__state__[0]
-      if queue
+      if queue && !Spinel::GENERATIONS
         old = @__watched__.fetch(fd, 0)
         new = monitors.each_value.inject(0, :|)
-        status = old == new ? 0 : Spinel.queue_set(queue, fd, old, new, @__gens__[fd])
-        if new.zero?
-          # A descriptor closed while watched has left the queue already, and
-          # epoll refuses to remove it; libev lets that pass too.
-          __unwatch__(fd)
-          @__eperms__.delete(fd)
-        elsif status == -Errno::EPERM::Errno
-          __unwatch__(fd)
-          @__eperms__[fd] = true
-        else
-          Spinel.check(status, "epoll_ctl")
-          @__watched__[fd] = new
-          @__eperms__.delete(fd)
+        unless old == new
+          Spinel.check(Spinel.queue_set(queue, fd, old, new, 0), "kevent")
+          new.zero? ? @__watched__.delete(fd) : @__watched__[fd] = new
         end
+      else
+        @__changes__ << fd unless @__changes__.include?(fd)
       end
       if monitors.empty?
         @__fds__.delete(fd)
@@ -279,10 +292,61 @@ module NIO
 
     private
 
-    # `fd` out of what the queue watches, its generation moved on.
-    def __unwatch__(fd)
-      return unless @__watched__.delete(fd) && Spinel::GENERATIONS
-      @__gens__[fd] = (@__gens__[fd] + 1) & 0x7FFF_FFFF
+    # What epoll's `emask` holds for a descriptor it refused (EV_EMASK_EPERM).
+    EPERM_MASK = -1
+
+    # The interests the monitors on `fd` want together (`anfd->events`).
+    def __wanted__(fd)
+      @__fds__.fetch(fd, {}).each_value.inject(0, :|)
+    end
+
+    # fd_reify: each changed descriptor whose interests differ from what the
+    # backend was last given goes through the backend's modify.
+    def __reify__
+      __rearm__ if @__postfork__
+      queue = @__state__[0]
+      @__changes__.each do |fd|
+        old = @__reified__.fetch(fd, 0)
+        new = __wanted__(fd)
+        next if old == new
+        new.zero? ? @__reified__.delete(fd) : @__reified__[fd] = new
+        queue ? __epoll_modify__(queue, fd, old, new) : __poll_modify__(fd, old, new)
+      end
+      @__changes__.clear
+    end
+
+    # poll_modify: a new descriptor takes the next slot of `polls`, and a
+    # removed one's slot goes to the last.
+    def __poll_modify__(fd, old, new)
+      if new.zero?
+        idx = @__slots__.index(fd)
+        last = @__slots__.pop
+        @__slots__[idx] = last if idx < @__slots__.size
+      elsif old.zero?
+        @__slots__ << fd
+      end
+    end
+
+    # epoll_modify: no interests leaves the kernel's registration in place,
+    # to be dropped when it reports something unwanted; otherwise the
+    # registration is added, or changed when the kernel holds another mask,
+    # under the descriptor's next generation. One epoll refuses joins
+    # `epoll_eperms`, unless its mask said so already. Any other refusal
+    # leaves the descriptor unwatched, its generation back, as libev's
+    # `dec_egen` does past its assertion.
+    def __epoll_modify__(queue, fd, old, new)
+      return if new.zero?
+      oldmask = @__emasks__.fetch(fd, 0)
+      @__emasks__[fd] = new
+      gen = @__gens__[fd] = (@__gens__[fd] + 1) & 0x7FFF_FFFF
+      status = Spinel.queue_set(queue, fd, !old.zero? && oldmask != new ? oldmask : 0, new, gen)
+      return if status.zero?
+      if status == -Errno::EPERM::Errno
+        @__emasks__[fd] = EPERM_MASK
+        @__eperms__ << fd unless oldmask == EPERM_MASK
+      else
+        @__gens__[fd] = (gen - 1) & 0x7FFF_FFFF
+      end
     end
 
     # NIO_Selector_synchronize: a lock the thread holding it takes again.
@@ -333,7 +397,11 @@ module NIO
     # watched; and the wakeup pipe.
     def __waiting_on__
       reader = @__state__[1]
-      return [[@__queue_io__, reader], nil] if @__state__[0]
+      if @__state__[0]
+        __reify__ if Spinel::GENERATIONS
+        return [[@__queue_io__, reader], nil]
+      end
+      __reify__ if @__state__[0].nil?
       readers = [reader]
       writers = []
       @__fds__.each_value do |monitors|
@@ -347,26 +415,38 @@ module NIO
       [readers.uniq, writers.uniq]
     end
 
-    # The ready descriptors now, without waiting: each event goes to the
-    # monitors on its descriptor that asked for it, as libev's `fd_event`.
-    def __collect__(ready)
+    # The ready descriptors now, without waiting, handed over in libev's
+    # order: the backend feeds each event (`fd_event`) to the watchers on its
+    # descriptor that asked for it, newest started first, onto the pending
+    # queue, and `ev_invoke_pending` invokes that queue last fed first. The
+    # backends feed descriptors in this order: epoll and kqueue as the kernel
+    # returns them, then epoll's `epoll_eperms` from the last; poll by `polls`
+    # slot; select from the highest descriptor down, or, when select(2) fails
+    # with EBADF, only the killed ones from the lowest up (`fd_ebadf`).
+    def __collect__(ready, &block)
       queue = @__state__[0]
       if queue
+        __reify__ if Spinel::GENERATIONS
         events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(Spinel::GENERATIONS ? 3 : 2).to_a
         events = __drop_strays__(queue, events)
-        @__eperms__.each_key { |fd| events << [fd, Spinel::READ | Spinel::WRITE] }
+        __eperm_events__(events) if Spinel::GENERATIONS
       else
-        pairs = @__fds__.map { |fd, monitors| [fd, monitors.each_value.inject(0, :|)] }
+        __reify__
+        pairs = @__slots__.map { |fd| [fd, @__reified__[fd]] }
         events = pairs.empty? ? "".b : Spinel.check(Spinel.poll_ready(pairs.flatten.pack("l<*")), "poll")
         events = events.unpack("l<*").each_slice(2).to_a
-        if @__backend__ == :select && events.any? { |_, got| got & Spinel::INVALID != 0 }
-          # select(2) fails with EBADF on a descriptor that is not open, and
-          # libev's select backend then kills those (`fd_ebadf`) and reports
-          # nothing else that run; poll(2) reports POLLNVAL beside the rest.
-          events = events.select { |_, got| got & Spinel::INVALID != 0 }
+        if @__backend__ == :select
+          if events.any? { |_, got| got & Spinel::INVALID != 0 }
+            # select(2) fails with EBADF on a descriptor that is not open, and
+            # libev's select backend then kills those (`fd_ebadf`) and reports
+            # nothing else that run; poll(2) reports POLLNVAL beside the rest.
+            events = events.select { |_, got| got & Spinel::INVALID != 0 }.sort_by(&:first)
+          else
+            events = events.sort_by { |fd, _| -fd }
+          end
         end
       end
-      count = 0
+      pending = {}
       events.each do |fd, got|
         monitors = @__fds__[fd] or next
         killed = got & Spinel::INVALID != 0
@@ -376,29 +456,62 @@ module NIO
           got = Spinel::READ | Spinel::WRITE
           monitors.each_key { |monitor| monitor.__stop__ }
           @__fds__.delete(fd)
+          @__changes__ << fd unless queue || @__changes__.include?(fd)
         end
-        monitors.to_a.each do |monitor, mask|
+        monitors.to_a.reverse_each do |monitor, mask|
           revents = killed ? got : got & mask
-          next if revents.zero?
-          monitor.__readiness__ = revents
-          count += 1
-          if ready
-            ready << monitor
-          else
-            yield monitor
-          end
+          # ev_feed_event: one already pending keeps its place.
+          pending[monitor] = pending.fetch(monitor, 0) | revents unless revents.zero?
+        end
+      end
+      __invoke__(pending.to_a.reverse, ready, &block)
+    end
+
+    # ev_invoke_pending: each monitor its event, unless its watcher stopped
+    # since it was fed; the count of monitors.
+    def __invoke__(pending, ready)
+      count = 0
+      @__stopped__ = {}
+      pending.each do |monitor, revents|
+        next if @__stopped__.key?(monitor)
+        monitor.__readiness__ = revents
+        count += 1
+        if ready
+          ready << monitor
+        else
+          yield monitor
         end
       end
       count
+    ensure
+      @__stopped__ = nil
     end
 
-    # epoll_poll's check of what an event got against what the queue was
-    # asked for: a registration nobody wants, such as one a descriptor
-    # closed while its description stayed open elsewhere left behind, is
-    # changed to what is wanted; one of another generation, or one the
-    # queue refuses to change, is dropped and the queue made again from
-    # what is watched, as libev's `postfork |= 2` makes it. The events
-    # left, as `(fd, mask)` pairs.
+    # epoll_poll's walk of `epoll_eperms` from the last: one still marked and
+    # wanted is ready for what is wanted; any other leaves, the last taking
+    # its place.
+    def __eperm_events__(events)
+      i = @__eperms__.size
+      while (i -= 1) >= 0
+        fd = @__eperms__[i]
+        wanted = __wanted__(fd) & (Spinel::READ | Spinel::WRITE)
+        if @__emasks__[fd] == EPERM_MASK && !wanted.zero?
+          events << [fd, wanted]
+        else
+          last = @__eperms__.pop
+          @__eperms__[i] = last if i < @__eperms__.size
+          @__emasks__.delete(fd) if @__emasks__[fd] == EPERM_MASK
+        end
+      end
+    end
+
+    # epoll_poll's and kqueue_poll's check of what an event got against
+    # what the queue was asked for: a registration nobody wants, such as one
+    # epoll keeps after its interests went, or one a descriptor closed while
+    # its description stayed open elsewhere left behind, is changed to what
+    # is wanted, or removed; one of another generation, or one the queue
+    # refuses to change, is dropped and the queue made again, as libev's
+    # `postfork |= 2` makes it. The events left, as `(fd, mask)` pairs.
     def __drop_strays__(queue, events)
       rebuild = false
       kept = events.filter_map do |fd, got, gen|
@@ -406,8 +519,11 @@ module NIO
           rebuild = true
           next
         end
-        want = @__watched__.fetch(fd, 0)
+        want = (Spinel::GENERATIONS ? @__reified__ : @__watched__).fetch(fd, 0)
         unless got & ~want == 0
+          if Spinel::GENERATIONS
+            want.zero? ? @__emasks__.delete(fd) : @__emasks__[fd] = want
+          end
           status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want, @__gens__[fd])
           unless status.zero?
             rebuild = true
@@ -416,23 +532,42 @@ module NIO
         end
         [fd, got]
       end
-      __rebuild_queue__ if rebuild
+      if rebuild
+        # epoll_fork runs at the start of the next run, after this one's
+        # monitors are handed over.
+        Spinel::GENERATIONS ? @__postfork__ = true : __rebuild_queue__
+      end
       kept
     end
 
-    # A new queue in the old one's place, watching what `@__watched__`
-    # holds; the old one closed.
-    def __rebuild_queue__
+    # A new queue in the old one's place, the old one closed.
+    def __new_queue__
       queue = Spinel.check(Spinel.queue_new, "epoll_create")
       old = @__state__[0]
       @__state__[0] = queue
       @__queue_io__ = IO.for_fd(queue, autoclose: false)
       Spinel.close(old)
+      queue
+    end
+
+    # epoll_fork's `fd_rearm_all`: every descriptor with interests, from the
+    # lowest up, is changed as if new, for `fd_reify` to add to the new queue.
+    def __rearm__
+      @__postfork__ = false
+      __new_queue__
+      @__reified__.keys.sort.each do |fd|
+        @__reified__.delete(fd)
+        @__emasks__.delete(fd)
+        @__changes__ << fd unless @__changes__.include?(fd)
+      end
+    end
+
+    # kqueue's: watching what `@__watched__` holds.
+    def __rebuild_queue__
+      queue = __new_queue__
       @__watched__.to_a.each do |fd, mask|
-        status = Spinel.queue_set(queue, fd, 0, mask, @__gens__[fd])
-        next if status.zero?
-        __unwatch__(fd)
-        @__eperms__[fd] = true if status == -Errno::EPERM::Errno
+        status = Spinel.queue_set(queue, fd, 0, mask, 0)
+        @__watched__.delete(fd) unless status.zero?
       end
     end
   end
