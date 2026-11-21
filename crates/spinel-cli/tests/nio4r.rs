@@ -623,6 +623,28 @@ fn an_io_closed_while_registered_is_selected_as_libev_selects_it() {
     );
 }
 
+/// Ready monitors handed over by `select`, in block and array forms, on the
+/// `:poll` and `:select` backends and on `:epoll` where the platform has it
+/// (#871): `fixtures/nio4r/order.rb` prints byte for byte what CRuby 4.0.9
+/// with upstream nio4r 2.7.5 printed (`order.txt`), in libev's order: each
+/// descriptor's watchers fed newest first, by `polls` slot, from the highest
+/// descriptor down, or as epoll returns them, then invoked last fed first.
+#[test]
+#[cfg(target_os = "linux")]
+fn select_hands_ready_monitors_over_in_libevs_order() {
+    let (sandbox, _source, _lock) = installed("order");
+    sandbox.write(
+        "order.rb",
+        &fs::read_to_string(fixture().join("order.rb")).unwrap(),
+    );
+    let out = sandbox.spinel().args(["run", "order.rb"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(
+        ok(&out, "spinel run order.rb"),
+        fs::read_to_string(fixture().join("order.txt")).unwrap()
+    );
+}
+
 /// Stock RubyGems and Bundler against the source that lists nio4r-spinel:
 /// CRuby 4.0's `gem` and `bundle`, which `SPINEL_CRUBY_BUNDLER` says are on
 /// `PATH`, resolve `nio4r` by name and never ask for `nio4r-spinel`. `bundle
