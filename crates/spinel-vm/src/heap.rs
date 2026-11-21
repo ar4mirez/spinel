@@ -2656,6 +2656,21 @@ impl<'h> HandleScope<'h> {
         Some(unsafe { std::slice::from_raw_parts(object.bytes(), header.len as usize) })
     }
 
+    /// [`HandleScope::bytes_mut`] for `value` under the rule above; `None`
+    /// for an immediate or an object of slots.
+    #[inline]
+    pub(crate) fn bytes_mut_of(&mut self, value: Value) -> Option<&mut [u8]> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        if header.payload != Payload::Bytes {
+            return None;
+        }
+        // SAFETY: `len` bytes were allocated after the header, and
+        // `&mut self` makes this the only reference to them.
+        Some(unsafe { std::slice::from_raw_parts_mut(object.bytes(), header.len as usize) })
+    }
+
     /// Whether `value` is frozen or chilled, under the rule above: what a
     /// write to a String asks first, in one read of its flags. `false` for
     /// an immediate, whose flags this does not keep.

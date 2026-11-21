@@ -373,27 +373,87 @@ pub fn append(
         return false;
     }
     let old_len = mine.bytesize();
-    let new_len = old_len + len;
-    let Some((capacity, shared)) = scope.bytes_layout_of(mine.buffer()) else {
+    let Some(target) = room_for(scope, string, &mine, len, may_allocate) else {
         return false;
-    };
-    let target = if !shared && new_len <= capacity {
-        debug_assert_eq!(mine.offset(), 0, "an unshared buffer is at 0");
-        mine.buffer()
-    } else {
-        if !may_allocate {
-            return false;
-        }
-        let grown = grown_capacity(shared, capacity, old_len, new_len);
-        grow(scope, string, mine.buffer(), mine.offset(), old_len, grown)
     };
     // `theirs.buffer()` is still the bytes to read: when `string` is
     // `other`, or shares its buffer, a grown `string` names a new one, and
     // the old one stays where it was — the collector moves nothing, and
     // nothing has collected since `grow` allocated.
     scope.copy_bytes_of(theirs.buffer(), from, target, old_len, len);
-    scope.set_immediate_slot_of(string, BYTESIZE, fixnum(new_len));
+    scope.set_immediate_slot_of(string, BYTESIZE, fixnum(old_len + len));
     true
+}
+
+/// `string << code` for an Integer `code` that is one byte of `string`'s
+/// encoding as it stands: any byte of a BINARY String, and an ASCII one of a
+/// UTF-8 or US-ASCII String. The same contract as [`append`]: `false`, with
+/// nothing changed, for anything else — a code past those, another
+/// encoding, US-ASCII becoming BINARY, or no room when `may_allocate` is
+/// false — which the Ruby half (`String#__append_codepoint__`) decides.
+pub fn append_byte(
+    scope: &mut HandleScope<'_>,
+    string: Value,
+    code: i64,
+    may_allocate: bool,
+) -> bool {
+    let Some(mine) = fields_of(scope, string) else {
+        return false;
+    };
+    let limit = match mine.encoding() {
+        BINARY => 0xff,
+        UTF_8 | US_ASCII => 0x7f,
+        _ => return false,
+    };
+    let Ok(byte) = u8::try_from(code) else {
+        return false;
+    };
+    if byte > limit {
+        return false;
+    }
+    let old_len = mine.bytesize();
+    let Some(target) = room_for(scope, string, &mine, 1, may_allocate) else {
+        return false;
+    };
+    let Some(bytes) = scope.bytes_mut_of(target) else {
+        return false;
+    };
+    bytes[old_len] = byte;
+    scope.set_immediate_slot_of(string, BYTESIZE, fixnum(old_len + 1));
+    true
+}
+
+/// The buffer `string`, whose fields are `mine`, writes `extra` more bytes
+/// to the end of, at its bytesize: its own when unshared and long enough,
+/// else a grown one — or `None` when that would allocate and `may_allocate`
+/// is false.
+#[inline(always)]
+fn room_for(
+    scope: &mut HandleScope<'_>,
+    string: Value,
+    mine: &Fields,
+    extra: usize,
+    may_allocate: bool,
+) -> Option<Value> {
+    let old_len = mine.bytesize();
+    let new_len = old_len + extra;
+    let (capacity, shared) = scope.bytes_layout_of(mine.buffer())?;
+    if !shared && new_len <= capacity {
+        debug_assert_eq!(mine.offset(), 0, "an unshared buffer is at 0");
+        return Some(mine.buffer());
+    }
+    if !may_allocate {
+        return None;
+    }
+    let grown = grown_capacity(shared, capacity, old_len, new_len);
+    Some(grow(
+        scope,
+        string,
+        mine.buffer(),
+        mine.offset(),
+        old_len,
+        grown,
+    ))
 }
 
 /// [`append`]'s buffer when the one `string` has is shared or too short: a
@@ -1473,6 +1533,62 @@ mod tests {
             [&all[..], &all[..80], b"cd"].concat()
         );
         assert_eq!(live(&mut scope, other), &all[10..]);
+    }
+
+    /// `append_byte` (#879): an Integer that is one byte of the receiver's
+    /// encoding as it stands goes on in place, growing as `append` does, and
+    /// off a shared buffer; anything else it declines, changing nothing.
+    #[test]
+    fn append_byte_puts_one_byte_on_or_declines_unchanged() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let binary = string(&mut scope, b"ab");
+        let bv = scope.get(binary);
+        assert!(
+            !append_byte(&mut scope, bv, 0xff, false),
+            "no room, no leave to grow"
+        );
+        assert_eq!(live(&mut scope, binary), b"ab");
+        for code in [0, 0x7f, 0x80, 0xff] {
+            assert!(append_byte(&mut scope, bv, code, true));
+        }
+        assert_eq!(live(&mut scope, binary), b"ab\x00\x7f\x80\xff");
+        assert_eq!(encoding(&mut scope, binary), BINARY);
+        for code in [-1, 0x100, i64::MAX] {
+            assert!(!append_byte(&mut scope, bv, code, true));
+        }
+        assert_eq!(live(&mut scope, binary), b"ab\x00\x7f\x80\xff");
+
+        // UTF-8 and US-ASCII take ASCII alone: past it is a codepoint, or
+        // US-ASCII becoming BINARY, which the Ruby half does.
+        for enc in [UTF_8, US_ASCII] {
+            let s = string(&mut scope, b"x");
+            set_encoding(&mut scope, s, enc);
+            let sv = scope.get(s);
+            assert!(append_byte(&mut scope, sv, i64::from(b'y'), true));
+            assert!(!append_byte(&mut scope, sv, 0x80, true));
+            assert_eq!(live(&mut scope, s), b"xy");
+            assert_eq!(encoding(&mut scope, s), enc);
+        }
+        let other = string(&mut scope, b"x");
+        set_encoding(&mut scope, other, CESU_8);
+        let ov = scope.get(other);
+        assert!(!append_byte(&mut scope, ov, i64::from(b'y'), true));
+        assert_eq!(live(&mut scope, other), b"x");
+
+        // A slice sharing a long String's buffer gets one of its own.
+        let all = text(100);
+        let long = string(&mut scope, &all);
+        let part = slice(&mut scope, long, 0, 80);
+        let pv = scope.get(part);
+        assert!(
+            !append_byte(&mut scope, pv, 0x41, false),
+            "a shared buffer is never written"
+        );
+        assert!(append_byte(&mut scope, pv, 0x41, true));
+        assert!(!shares(&mut scope, long, part));
+        assert_eq!(live(&mut scope, part), [&all[..80], b"A"].concat());
+        assert_eq!(live(&mut scope, long), &all[..]);
     }
 
     /// `drop_front` (#41): the rest stays where it lies, the buffer now

@@ -5911,6 +5911,22 @@ fn append_plain(
         && crate::strings::append(scope, receiver, other, may_allocate)
 }
 
+/// `String#<<`'s case of an Integer that is one byte of the receiver's
+/// encoding as it stands (see [`crate::strings::append_byte`]), for an
+/// unfrozen, unchilled receiver: `s << 97` without the Ruby half's calls,
+/// which made each such append cost as much as several hundred
+/// instructions (#879). The same contract as [`append_plain`].
+#[inline(always)]
+fn append_byte_plain(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    code: i64,
+    may_allocate: bool,
+) -> bool {
+    !scope.is_frozen_or_chilled_of(receiver)
+        && crate::strings::append_byte(scope, receiver, code, may_allocate)
+}
+
 /// Whether `native` has a light form, [`native_light`], for a site passing
 /// `argc` positional arguments and nothing else.
 fn has_native_light(native: Native, argc: usize) -> bool {
@@ -6001,6 +6017,9 @@ fn native_light(
             let &[other] = args else { return None };
             if !is_string(scope, plan.class) {
                 return None;
+            }
+            if let Some(code) = other.as_fixnum() {
+                return append_byte_plain(scope, receiver, code, may_allocate).then_some(receiver);
             }
             // An argument of the receiver's own class is a String too, which
             // its header says in one load.
@@ -14289,18 +14308,24 @@ fn native_call<'h>(
         }
         Native::StringAppend(rest) => {
             let other = first_arg(&call);
-            if call.args.len() == 1
+            let receiver_is_string = call.args.len() == 1
                 && !call.receiver.is_immediate()
-                && heap_kind(scope, call.receiver) == Some(HeapKind::Str)
-                && heap_kind(scope, other) == Some(HeapKind::Str)
-                && {
-                    // Held, since the append reads both by value and may
-                    // allocate: this path is reached from more places than
-                    // the loop that rooted the stack.
+                && heap_kind(scope, call.receiver) == Some(HeapKind::Str);
+            if receiver_is_string
+                && (if let Some(code) = other.as_fixnum() {
+                    // Held, as below: the append may allocate.
                     scope.root(call.receiver);
-                    scope.root(other);
-                    append_plain(scope, call.receiver, other, true)
-                }
+                    append_byte_plain(scope, call.receiver, code, true)
+                } else {
+                    heap_kind(scope, other) == Some(HeapKind::Str) && {
+                        // Held, since the append reads both by value and may
+                        // allocate: this path is reached from more places than
+                        // the loop that rooted the stack.
+                        scope.root(call.receiver);
+                        scope.root(other);
+                        append_plain(scope, call.receiver, other, true)
+                    }
+                })
             {
                 stack.push(call.receiver);
                 return Ok(None);
