@@ -6013,13 +6013,17 @@ fn native_light(
         Native::Math => light_math(args),
         Native::Reflect(ReflectOp::KindOf) => light_kind_of(scope, args),
         Native::ArrayIndex => light_array_index(scope, receiver, args),
-        Native::StringAppend(_) => {
+        Native::StringAppend(rest) => {
             let &[other] = args else { return None };
             if !is_string(scope, plan.class) {
                 return None;
             }
             if let Some(code) = other.as_fixnum() {
-                return append_byte_plain(scope, receiver, code, may_allocate).then_some(receiver);
+                // Only `<<` appends an Integer as a byte; `__append_as_string__`
+                // appends its `to_s`, which the Ruby half does.
+                return (rest == "__append__"
+                    && append_byte_plain(scope, receiver, code, may_allocate))
+                .then_some(receiver);
             }
             // An argument of the receiver's own class is a String too, which
             // its header says in one load.
@@ -14313,9 +14317,12 @@ fn native_call<'h>(
                 && heap_kind(scope, call.receiver) == Some(HeapKind::Str);
             if receiver_is_string
                 && (if let Some(code) = other.as_fixnum() {
-                    // Held, as below: the append may allocate.
-                    scope.root(call.receiver);
-                    append_byte_plain(scope, call.receiver, code, true)
+                    // Only `<<` appends an Integer as a byte (see
+                    // `native_light`). Held, as below: the append may allocate.
+                    rest == "__append__" && {
+                        scope.root(call.receiver);
+                        append_byte_plain(scope, call.receiver, code, true)
+                    }
                 } else {
                     heap_kind(scope, other) == Some(HeapKind::Str) && {
                         // Held, since the append reads both by value and may
