@@ -82,6 +82,35 @@ fn reads_info_lines_as_gem_parser_does() {
 }
 
 #[test]
+fn reads_empty_info_values_as_gem_parser_does() {
+    // rubygems.org's /info/archive-tar-minitar, 0.5.1 (issue #878): an empty
+    // `rubygems:` is `"".split("&")`, `[]`, which `Gem::Requirement.new` reads
+    // as `>= 0`.
+    let info = "---\n\
+        0.5.1 |checksum:f8eb8f78342e3366509d2acb6ee87afec77e49c1545c7e7a76bdaab0f820db46,ruby:>= 1.8.1,rubygems:\n";
+    let specs = parse_info("archive-tar-minitar", info.as_bytes(), &local()).unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].full_name(), "archive-tar-minitar-0.5.1");
+    assert_eq!(specs[0].required_ruby_version.to_string(), ">= 1.8.1");
+    assert_eq!(specs[0].required_rubygems_version, req(&[]));
+    assert_eq!(
+        specs[0].checksum.as_deref(),
+        Some("f8eb8f78342e3366509d2acb6ee87afec77e49c1545c7e7a76bdaab0f820db46")
+    );
+    // The same for `ruby:`, a dependency's requirement, and a trailing `&`;
+    // an empty `checksum:` is no checksum, as Bundler's `parse_metadata` reads it.
+    let specs = parse_info("demo", b"1.0 rack:,tilt:>= 2&|ruby:,checksum:", &local()).unwrap();
+    assert_eq!(specs[0].required_ruby_version, req(&[]));
+    assert_eq!(specs[0].dependencies[0], ("rack".to_owned(), req(&[])));
+    assert_eq!(specs[0].dependencies[1].1.to_string(), ">= 2");
+    assert_eq!(specs[0].checksum, None);
+    // Ruby's `split` keeps an empty part before a non-empty one, and
+    // `Gem::Requirement.new(["", ">= 2"])` is ill-formed.
+    assert!(parse_info("demo", b"1.0 |ruby:&>= 2", &local()).is_err());
+    assert!(parse_info("demo", b"1.0 rack:>= 1&&< 2", &local()).is_err());
+}
+
+#[test]
 fn ranges_hold_what_requirements_are_satisfied_by() {
     let versions = [
         "0.9", "1.0.a", "1", "1.0", "1.0.1", "1.4", "1.4.4", "1.5", "1.9", "2.0.a", "2.0", "2.1",
