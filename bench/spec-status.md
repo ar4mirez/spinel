@@ -18,7 +18,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/conditionvariable` | 4 | 11 | 11 | 0 | 0 | 0 | 100% |
 | `core/data` | 13 | 89 | 89 | 0 | 0 | 0 | 100% |
 | `core/dir` | 34 | 333 | 333 | 0 | 0 | 0 | 100% |
-| `core/encoding` | 45 | 637 | 627 | 0 | 10 | 0 | 98% |
+| `core/encoding` | 45 | 637 | 632 | 0 | 5 | 0 | 99% |
 | `core/enumerable` | 61 | 536 | 527 | 0 | 6 | 3 | 98% |
 | `core/enumerator` | 73 | 432 | 432 | 0 | 0 | 0 | 100% |
 | `core/env` | 45 | 193 | 193 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 33013 | 30928 | 0 | 1969 | 116 | 94% |
+| **total** | 3841 | 33013 | 30933 | 0 | 1964 | 116 | 94% |

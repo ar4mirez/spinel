@@ -193,16 +193,14 @@ const fn writer<const N: usize>(cells: &[u16], astral: &[u32], unchosen: &[u16])
     // Sorts the far ones by what they read as.
     let mut i = n + 1;
     while i < N {
+        let held = out[i];
+        let key = astral[(cells[held as usize] - ASTRAL) as usize];
         let mut j = i;
-        while j > n
-            && astral[(cells[out[j - 1] as usize] - ASTRAL) as usize]
-                > astral[(cells[out[j] as usize] - ASTRAL) as usize]
-        {
-            let held = out[j];
+        while j > n && astral[(cells[out[j - 1] as usize] - ASTRAL) as usize] > key {
             out[j] = out[j - 1];
-            out[j - 1] = held;
             j -= 1;
         }
+        out[j] = held;
         i += 1;
     }
     out
