@@ -2,8 +2,9 @@
 # `crates/spinel-vm/src/transcode.rs` one step at a time. The VM converts
 # between the encodings whose mapping is arithmetic — UTF-8, US-ASCII,
 # BINARY, ISO-8859-1, UTF-16 and UTF-32 — EUC-JP, Shift_JIS,
-# Windows-31J, CP51932, EUC-KR and the single-byte code pages, whose mapping
-# is CRuby's table (#378, #419, #725, #41),
+# Windows-31J, CP51932, EUC-KR, the single-byte code pages and the CJK
+# multibyte encodings, whose mapping is CRuby's table (#378, #419, #725,
+# #41, #796),
 # ISO-2022-JP and stateless-ISO-2022-JP (#404), and CP50220 and CP50221
 # (#419), and refuses any other. This file finds the
 # path of CRuby's converters a conversion takes, and is CRuby's rules about
@@ -79,6 +80,11 @@ class String
   # names upcased: `WINDOWS-1252`, `MACROMAN`. `scripts/codepage-table.rb`
   # keeps the list. Measured.
   CODE_PAGES = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 69, 70, 71, 72, 74, 75, 89, 90, 91, 92].freeze
+
+  # The CJK multibyte encodings, `cjk.rs`'s (#796): Big5, Big5-HKSCS,
+  # Big5-UAO, CP949, GB18030, GBK, CP950, CP951, eucJP-ms, EUC-JIS-2004,
+  # GB2312 and GB12345.
+  CJK = [12, 13, 14, 16, 20, 21, 76, 77, 80, 82, 83, 84].freeze
 
   def encode(*args, **options)
     __transcoded__(args, options)
@@ -568,7 +574,7 @@ class String
 
   def self.__supported_target__(encoding)
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 18, 22, 39, 79, 81, 85, 87, 88].include?(encoding.__index__) ||
-      CODE_PAGES.include?(encoding.__index__)
+      CODE_PAGES.include?(encoding.__index__) || CJK.include?(encoding.__index__)
   end
 
   # Every encoding a conversion passes through, `source` to `target`, along

@@ -5,8 +5,11 @@
 //! Windows-31J (#378, in `jis.rs`), ISO-2022-JP and stateless-ISO-2022-JP
 //! (#404, in `iso2022jp.rs`), CP51932, by CRuby's table too, with CP50220
 //! and CP50221 through it (#419, in `cp5022x.rs`), and EUC-KR, by CRuby's
-//! table (#725, in `euckr.rs`), and the single-byte code pages, by CRuby's
-//! table (#41, in `codepage.rs`). Any other pair is refused by the caller.
+//! table (#725, in `euckr.rs`), the single-byte code pages, by CRuby's
+//! table (#41, in `codepage.rs`), and the CJK multibyte encodings — GBK,
+//! GB18030, GB2312, GB12345, the Big5 family, CP949, EUC-JIS-2004 and
+//! eucJP-ms — by CRuby's tables (#796, in `cjk.rs`). Any other pair is
+//! refused by the caller.
 //!
 //! The unit of work is [`step`]: convert from a byte offset until the input
 //! ends or a character cannot be converted, and report which and why. A
@@ -47,6 +50,7 @@ pub fn supported(encoding: u8) -> bool {
     ) || crate::jis::supported(encoding)
         || crate::euckr::supported(encoding)
         || crate::codepage::supported(encoding)
+        || crate::cjk::supported(encoding)
 }
 
 /// One source character, or why there is none.
@@ -206,6 +210,12 @@ fn decode(encoding: u8, bytes: &[u8], at: usize) -> Decoded {
             }
             crate::euckr::Read::Incomplete(len) => Decoded::Incomplete(len),
         },
+        _ if crate::cjk::supported(encoding) => match crate::cjk::read(encoding, bytes, at) {
+            crate::cjk::Read::Char(Some(code), len) => Decoded::Char(code, len),
+            crate::cjk::Read::Char(None, len) => Decoded::Undefined(len),
+            crate::cjk::Read::Invalid { error, readagain } => Decoded::Invalid { error, readagain },
+            crate::cjk::Read::Incomplete(len) => Decoded::Incomplete(len),
+        },
         _ if crate::codepage::supported(encoding) => match crate::codepage::read(encoding, rest[0])
         {
             Some(code) => Decoded::Char(code, 1),
@@ -269,6 +279,7 @@ pub fn encode(encoding: u8, code: u32) -> Option<Vec<u8>> {
         }
         _ if crate::euckr::supported(encoding) => crate::euckr::encode(code),
         _ if crate::codepage::supported(encoding) => crate::codepage::encode(encoding, code),
+        _ if crate::cjk::supported(encoding) => crate::cjk::encode(encoding, code),
         _ => None,
     }
 }
@@ -464,6 +475,7 @@ fn by_codepoint(encoding: u8) -> bool {
     ) || crate::jis::supported(encoding)
         || crate::euckr::supported(encoding)
         || crate::codepage::supported(encoding)
+        || crate::cjk::supported(encoding)
 }
 
 /// Whether CRuby has a converter from `from` to `to` that this VM runs:
@@ -585,6 +597,18 @@ fn hop(from: u8, to: u8, bytes: &[u8], at: usize, state: &mut State, out: &mut V
             Read::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
             Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
         },
+        // `scrub` reads a CJK encoding by its own characters, not its
+        // converter's.
+        _ if from == to && crate::cjk::supported(from) => {
+            match crate::cjk::scrubbed(from, bytes, at) {
+                crate::cjk::Scrubbed::Char(len) => {
+                    out.extend_from_slice(&bytes[at..at + len]);
+                    Ok(len)
+                }
+                crate::cjk::Scrubbed::Invalid(len) => Err((Stop::Invalid, len, 0)),
+                crate::cjk::Scrubbed::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+            }
+        }
         _ => match decode(from, bytes, at) {
             Decoded::Char(_, len) | Decoded::Undefined(len) if from == to => {
                 out.extend_from_slice(&bytes[at..at + len]);
