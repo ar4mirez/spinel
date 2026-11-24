@@ -241,12 +241,14 @@ fn the_target_binary_is_fetched_once_and_the_app_runs() {
     assert!(out.contains("shout: ONE"), "{out}");
 
     // The release is gone, so a second build that works fetched nothing.
+    // Same file name, another directory: on macOS `codesign` takes the
+    // app's identifier from its file name, so only then are the bytes equal.
     fs::remove_file(sandbox.release(&host)).expect("the release is removed");
     ok(
-        &sandbox.build("out/again", &host),
+        &sandbox.build("again/mytool", &host),
         "spinel build --target from the cache",
     );
-    let again = sandbox.project().join("out/again");
+    let again = sandbox.project().join("again/mytool");
     let out = ok(&sandbox.run(&again, &["two"]), "the second app");
     assert!(out.contains("shout: TWO"), "{out}");
     assert_eq!(
