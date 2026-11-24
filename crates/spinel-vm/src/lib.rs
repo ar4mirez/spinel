@@ -21,7 +21,7 @@ pub const LANGUAGE_VERSION: &str = "4.0.0";
 ///
 /// Spinel's, not CRuby's: the day [`ENGINE_VERSION`] was cut. Set it together
 /// with the workspace version.
-pub const RELEASE_DATE: &str = "2026-09-03";
+pub const RELEASE_DATE: &str = "2026-11-24";
 
 /// Reported as `RUBY_COPYRIGHT`, shaped like CRuby's
 /// `ruby - Copyright (C) 1993-2025 Yukihiro Matsumoto`. The holder is `LICENSE`'s.
