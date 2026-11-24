@@ -59,7 +59,30 @@ Users never see a Spinel CLI: `mytool --help` is the app's `--help`, and so is e
 
 ## Cross-compiling
 
-`--target aarch64-linux` downloads the matching `spinel` release binary into `~/.spinel/targets/` and appends a payload built for it. Pure-Ruby gems are portable. `.spinel` extensions must exist for the target platform; Spinel-native gems publish every supported platform, so this is normally a download. If one is missing the build fails with the gem name.
+```
+spinel build --compile <entry> -o <app> --target <triple> [...]
+```
+
+`--target` (#102, `crates/spinel-cli/src/target.rs`) writes the payload into the `spinel` release binary for another platform instead of the running one. The triples are the platforms a release is built for:
+
+| `--target` | Binary |
+|---|---|
+| `x86_64-linux` | ELF, x86-64 |
+| `aarch64-linux` | ELF, arm64 |
+| `x86_64-macos` | Mach-O, x86-64 |
+| `aarch64-macos` | Mach-O, arm64 |
+
+The binary is the release asset `<base>/v<version>/spinel-<triple>`: the binary itself, not an archive, and `<version>` is the running `spinel`'s (`CARGO_PKG_VERSION`), so the app runs the engine that compiled its bytecode and wrote its manifest. `<base>` is `https://github.com/ar4mirez/spinel/releases/download`, the GitHub release tagged `v<version>`, or `SPINEL_RELEASES_URL` for a mirror. It is fetched over HTTPS only, every redirect included; a `file://` base reads a local directory laid out the same way, which is how the tests serve one. A missing asset stops the build naming the triple, the version and the URL.
+
+A fetched binary is streamed into `$SPINEL_HOME/targets/<version>/<triple>/` (`~/.spinel/targets/...` by default) beside its place, checked, and renamed to `spinel` there, so the cache only ever holds a whole, checked binary, and a later build for that target and version reuses it without the network. The check reads the file's header: a 64-bit little-endian ELF executable (`ET_EXEC` or `ET_DYN`) whose `e_machine` is the target's CPU for Linux, a thin 64-bit Mach-O `MH_EXECUTE` whose `cputype` is for macOS. Anything else, a binary for another platform included, stops the build, saying what it is, and is not kept. The payload is then written into the binary as the "Format" section above writes it: appended for Linux, in the section and signed for macOS. Without `--target` nothing changes: the binary is the running `spinel` and nothing is fetched.
+
+An app for macOS is signed with `codesign`, so `--target x86_64-macos` and `--target aarch64-macos` work only on macOS and stop, before fetching anything, elsewhere (the ponytail in "Format"). An app for Linux builds anywhere, macOS included.
+
+Pure-Ruby gems are portable and go in as they are. `.spinel` extensions must exist for the target platform; Spinel-native gems publish every supported platform, so this will normally be a download. Until the extension loader (#103–#105) chooses them, a build with `--target` stops when a gem it packs carries a native extension's file (`.so`, `.bundle`, `.dylib`, `.dll` or `.spinel`, built for this machine), naming the gem and the file.
+
+Not done yet: release assets carry no checksum or signature that the download checks, beyond HTTPS and the header check, and no workflow publishes them yet (#886).
+
+`crates/spinel-cli/tests/build_target.rs` serves a release from a `file://` directory: a copy of the `spinel` under test for the host's triple, whose app runs, and is built a second time from the cache with the release removed; a crafted ELF header for another Linux CPU, which the app starts with, byte for byte, before its payload and trailer; a binary for the wrong CPU and a script, refused and not kept; a missing release; an unknown triple and a plain `http://` mirror; a gem with a `.so`, which stops the cross build but not a plain one; and, on Linux, a macOS target.
 
 ## Size and startup
 

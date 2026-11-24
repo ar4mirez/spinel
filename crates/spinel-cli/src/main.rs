@@ -41,6 +41,7 @@ mod resolver;
 mod ruby_args;
 mod ruby_version;
 mod stdlib;
+mod target;
 mod test_runner;
 mod test_watch;
 mod trailer;
@@ -65,8 +66,6 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/build.md): running the apps `spinel build` writes, and
-`--target`.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -480,6 +479,13 @@ enum Command {
         #[arg(long, value_name = "KEY=VALUE")]
         env: Vec<String>,
 
+        /// Write the app for another platform: x86_64-linux, aarch64-linux,
+        /// x86_64-macos or aarch64-macos. The `spinel` release binary of
+        /// this version for it is downloaded once, into
+        /// `~/.spinel/targets/`, and the payload written into it.
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
+
         /// The arguments the app's `ARGV` starts with.
         #[arg(last = true, value_name = "ARGS")]
         argv: Vec<String>,
@@ -686,6 +692,7 @@ fn main() -> ExitCode {
             exclude,
             group,
             env,
+            target,
             argv,
         }) => {
             return build::run(&build::Request {
@@ -695,6 +702,7 @@ fn main() -> ExitCode {
                 exclude: &exclude,
                 groups: &group,
                 env: &env,
+                target: target.as_deref(),
                 argv: &argv,
             });
         }
