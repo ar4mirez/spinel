@@ -1,6 +1,6 @@
 # Engine
 
-The VM that runs Ruby. Every choice below is either a **decision** (settled with the owner, listed in README) or a **default** (a reasonable starting point that a slice may replace if ruby/spec or a benchmark says so). Defaults are marked.
+The VM that runs Ruby. Every choice below is either a **decision** (settled with the owner, listed in [design.md](design.md)) or a **default** (a reasonable starting point that a slice may replace if ruby/spec or a benchmark says so). Defaults are marked.
 
 **Language version.** Spinel implements one Ruby language version at a time, the latest stable release (4.0 at launch), and `RUBY_VERSION` reports it. ruby/spec is checked out at the matching branch so `ruby_version_is` guards select the right specs. See cli.md for the full identity table.
 
