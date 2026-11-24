@@ -159,7 +159,7 @@ jobs:
 
   # The published release as `mise use -g github:ar4mirez/spinel` installs
   # it on each platform. A release published with this run's token starts no
-  # other workflow, so `mise-install.yml`'s own `release` trigger misses it.
+  # other workflow, so this calls `mise-install.yml` once the assets are up.
   mise-install:
     name: mise install
     needs: publish
