@@ -36,7 +36,7 @@ pub const PLATFORM: &str = env!("SPINEL_RUBY_PLATFORM");
 /// The one-line banner printed by `spinel --version`, and `RUBY_DESCRIPTION`.
 ///
 /// Shaped like `ruby -v` so a Ruby developer can read it without being told how:
-/// `spinel 0.0.1 (ruby 4.0.0) [arm64-darwin24]`.
+/// `spinel 0.1.0 (ruby 4.0.0) [arm64-darwin24]`.
 pub fn description() -> String {
     format!("{ENGINE} {ENGINE_VERSION} (ruby {LANGUAGE_VERSION}) [{PLATFORM}]")
 }
