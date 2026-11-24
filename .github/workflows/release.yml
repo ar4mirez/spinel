@@ -1,0 +1,227 @@
+name: Release
+
+# The `spinel` binaries `spinel build --target <triple>` writes an app into
+# (#102, #886; docs/build.md, "Cross-compiling"): one per triple, uploaded to
+# the GitHub release of a `v<version>` tag as `spinel-<triple>`, the binary
+# itself, which `crates/spinel-cli/src/target.rs` fetches from
+# `https://github.com/ar4mirez/spinel/releases/download/v<version>/spinel-<triple>`.
+#
+# A pull request that changes this file, or a manual run, does everything but
+# publish: the binaries are workflow artifacts, and the cross build reads them
+# from a `file://` mirror laid out as the release is.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths: ['.github/workflows/release.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A force-push to a pull request should not leave the old run burning CI
+# minutes; a tag's run is never cancelled halfway through publishing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Each binary on a runner of its own platform, so it links that platform's
+  # OpenSSL 3 as the CI build does (docs/architecture.md); no cross toolchain.
+  build:
+    name: build (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-linux, os: ubuntu-24.04 }
+          - { triple: aarch64-linux, os: ubuntu-24.04-arm }
+          - { triple: x86_64-macos, os: macos-15-intel }
+          - { triple: aarch64-macos, os: macos-26 }
+    steps:
+      # The build reads no submodule: `spec/` is the ruby/spec corpus.
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # As in ci.yml: `crates/spinel-vm/build.rs` refuses anything but
+      # OpenSSL 3, headers and all.
+      - name: OpenSSL 3 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - name: OpenSSL 3 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      # No build cache: a release is built from the tag's sources alone.
+      - name: Build
+        run: cargo build --release --locked -p spinel-cli
+
+      # docs/build.md, "Format": an app for macOS is this binary with the
+      # payload in its `__SPINEL,__payload` section, signed ad hoc again. The
+      # release binary is signed the same way, so it runs as it is and
+      # `codesign --verify --strict` holds before a payload is written in.
+      - name: Sign ad hoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - target/release/spinel
+          codesign --verify --strict --verbose=2 target/release/spinel
+
+      - name: spinel-${{ matrix.triple }}
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/release/spinel "dist/spinel-${{ matrix.triple }}"
+          version=$(dist/spinel-${{ matrix.triple }} --version | awk '{ print $2 }')
+          echo "spinel ${version} for ${{ matrix.triple }}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      # `--target` fetches `v<version>` for the running spinel's version, so
+      # a binary under a tag for another version is never fetched.
+      - name: The tag names this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not v${VERSION}, the version spinel reports (Cargo.toml's workspace.package.version)"
+            exit 1
+          fi
+
+      # The asset as `--target` will take it: served from a `file://` mirror
+      # laid out as the release is, checked by its header, and written into,
+      # appended on Linux and in the section and signed on macOS; then the
+      # app runs. `fixtures/app` is the app `tests/build_target.rs` builds.
+      - name: spinel build --target ${{ matrix.triple }} from the asset
+        shell: bash
+        run: |
+          work="${RUNNER_TEMP}/selfcheck"
+          cp -R crates/spinel-cli/tests/fixtures/app "${work}"
+          mkdir -p "${work}/releases/v${VERSION}"
+          cp "dist/spinel-${{ matrix.triple }}" "${work}/releases/v${VERSION}/"
+          export SPINEL_HOME="${work}/home" XDG_CACHE_HOME="${work}/cache"
+          export SPINEL_RELEASES_URL="file://${work}/releases"
+          cd "${work}/project"
+          "${GITHUB_WORKSPACE}/dist/spinel-${{ matrix.triple }}" install
+          "${GITHUB_WORKSPACE}/dist/spinel-${{ matrix.triple }}" build --compile bin/mytool \
+            -o "${work}/mytool" --target "${{ matrix.triple }}"
+          if [ "${RUNNER_OS}" = macOS ]; then
+            codesign --verify --strict "${work}/mytool"
+          fi
+          cd "${work}"
+          ./mytool one | tee out.txt
+          grep -Fq 'shout: ONE' out.txt
+
+      # Zipped, so the executable bit is not kept; `--target` sets it again
+      # on what it fetches.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spinel-${{ matrix.triple }}
+          path: dist/spinel-${{ matrix.triple }}
+          if-no-files-found: error
+
+  # Only a `v*` tag publishes. The release is made for the tag if there is
+  # none yet; a run again replaces the assets of the same name.
+  publish:
+    name: publish
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: spinel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          for triple in x86_64-linux aarch64-linux x86_64-macos aarch64-macos; do
+            test -s "dist/spinel-${triple}" || { echo "::error::no spinel-${triple}"; exit 1; }
+          done
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/spinel-* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/spinel-* --verify-tag \
+              --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
+
+  # The end-to-end check #102 deferred to #886: on macOS, `spinel build
+  # --target aarch64-linux` writes an app that the next job runs on Linux
+  # arm64. After a tag's publish it fetches from the published release, the
+  # default base; otherwise from a `file://` mirror of this run's binaries.
+  cross:
+    name: cross build (aarch64-macos to aarch64-linux)
+    needs: [build, publish]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: spinel-aarch64-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/dist
+
+      - name: spinel build --target aarch64-linux
+        env:
+          PUBLISHED: ${{ needs.publish.result == 'success' }}
+        run: |
+          dist="${RUNNER_TEMP}/dist"
+          chmod +x "${dist}"/spinel-*
+          spinel="${dist}/spinel-aarch64-macos"
+          version=$("${spinel}" --version | awk '{ print $2 }')
+          work="${RUNNER_TEMP}/cross"
+          cp -R crates/spinel-cli/tests/fixtures/app "${work}"
+          export SPINEL_HOME="${work}/home"
+          if [ "${PUBLISHED}" = true ]; then
+            echo "from the published release v${version}"
+            unset SPINEL_RELEASES_URL
+          else
+            echo "from a file:// mirror of this run's binaries"
+            mkdir -p "${work}/releases/v${version}"
+            cp "${dist}/spinel-aarch64-linux" "${work}/releases/v${version}/"
+            export SPINEL_RELEASES_URL="file://${work}/releases"
+          fi
+          cd "${work}/project"
+          "${spinel}" install
+          "${spinel}" build --compile bin/mytool -o "${RUNNER_TEMP}/out/mytool" --target aarch64-linux
+          file "${RUNNER_TEMP}/out/mytool"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mytool-aarch64-linux
+          path: ${{ runner.temp }}/out/mytool
+          if-no-files-found: error
+
+  cross-run:
+    name: cross build runs (aarch64-linux)
+    needs: cross
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: mytool-aarch64-linux
+          path: app
+
+      - name: The app runs on Linux arm64
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/cache
+        run: |
+          chmod +x app/mytool
+          app/mytool one | tee out.txt
+          grep -Fq 'shout: ONE' out.txt
