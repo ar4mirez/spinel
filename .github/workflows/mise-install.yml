@@ -7,12 +7,10 @@ name: mise install
 # PATH, both pinned to a version and unpinned (the latest release).
 #
 # A release published by `release.yml`'s own token starts no other workflow,
-# so `release.yml` calls this one after `publish`; `release: published`
-# covers a release published by hand. A pull request that changes this file,
-# or a manual run with no version, checks the latest release.
+# so `release.yml` calls this one after `publish`, once the assets are up. A
+# pull request that changes this file, or a manual run with no version, checks
+# the latest release.
 on:
-  release:
-    types: [published]
   pull_request:
     paths: ['.github/workflows/mise-install.yml']
   workflow_dispatch:
@@ -31,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || github.event.release.tag_name || 'latest' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || 'latest' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -47,7 +45,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
       GH_REPO: ar4mirez/spinel
-      REQUESTED: ${{ inputs.version || github.event.release.tag_name || 'latest' }}
+      REQUESTED: ${{ inputs.version || 'latest' }}
     steps:
       # The official action, without installing any tool or restoring a
       # cache: each check below starts mise from empty directories of its own.
