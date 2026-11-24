@@ -25,10 +25,14 @@
 # - With `--suite`, `suite.txt`: each test of Puma's own suite (`app/test/`,
 #   which `gems/puma-spinel/vendor.sh` vendors) and how it ended on this Ruby
 #   with upstream Puma, run as `tests/puma.rs` runs it on Spinel, offline: in
-#   a network namespace of its own (`unshare -rn`), with only loopback up.
+#   a network namespace of its own (`unshare -rn`), with only loopback up,
+#   and `TestPumaServerSSLKeyUpdate` flooding the server with KeyUpdates from
+#   the client cargo builds of
+#   `gems/puma-spinel/ext/puma_spinel/examples/key_update_peer.rs`
+#   (`key_update_peer.rb`) in place of the C one it compiles, as on Spinel.
 #
-# Opt-in, never run by CI: it needs the network, Ruby 4.0.9, Bundler and a C
-# compiler. The files it writes are committed.
+# Opt-in, never run by CI: it needs the network, Ruby 4.0.9, Bundler, cargo
+# and a C compiler. The files it writes are committed.
 
 require "digest"
 require "fileutils"
@@ -48,9 +52,9 @@ end
 
 substituted = %w[nio4r puma]
 # What neither run of the suite runs, as `tests/puma.rs` leaves it out (its
-# `EXCLUDED` says why, test by test): what needs rubygems.org, a C compiler
-# named by `RbConfig::CONFIG["CC"]`, or the interpreter to be MRI.
-EXCLUDED = "/\\A(?:TestWorkerGemIndependence|TestPumaServerSSLKeyUpdate|TestIntegrationSSLSession)#" \
+# `EXCLUDED` says why, test by test): what needs rubygems.org, or the
+# interpreter to be MRI.
+EXCLUDED = "/\\A(?:TestWorkerGemIndependence|TestIntegrationSSLSession)#" \
   "|\\A(?:TestPluginSystemd#test_systemd_(?:cluster_)?notify" \
   "|TestIntegrationPumactl#test_control_gc_stats_(?:tcp|unix)" \
   "|TestRackUp::RackUp#test_(?:bin|rackup1)" \
@@ -202,6 +206,10 @@ Dir.mktmpdir do |dir|
     FileUtils.cp_r(File.join(puma, "lib"), project)
     FileUtils.cp_r(File.join(puma, "bin"), project)
     run, = install(project)
+    # The KeyUpdate client, as `tests/puma.rs` builds it.
+    target = File.join(dir, "target")
+    system("cargo", "build", "--quiet", "--package", "puma-spinel", "--example", "key_update_peer",
+      "--manifest-path", File.join(here, "../../../../../Cargo.toml"), "--target-dir", target, exception: true)
     # `CI` turns on minitest-retry, which Puma's own CI runs its suite with
     # for the tests that race the server; the GitHub step summary it would
     # also write is off without `GITHUB_ACTIONS`.
@@ -210,9 +218,11 @@ Dir.mktmpdir do |dir|
     # fixed sleeps, and Spinel's threads of one Ractor take turns.
     results = File.join(dir, "results.txt")
     run = run.merge("CI" => "1", "GITHUB_ACTIONS" => nil, "GITHUB_STEP_SUMMARY" => nil, "MT_CPU" => "1",
-      "PUMA_SUITE_RESULTS" => results)
+      "PUMA_SUITE_RESULTS" => results,
+      "PUMA_KEY_UPDATE_PEER" => File.join(target, "debug/examples/key_update_peer"))
     command = ["unshare", "-rn", "sh", "-c", 'ip link set lo up && exec "$@"', "sh",
-      "ruby", "-rbundler/setup", "-r#{File.join(here, "results.rb")}", "-Ilib", "test/runner", "-v",
+      "ruby", "-rbundler/setup", "-r#{File.join(here, "results.rb")}",
+      "-r#{File.join(here, "key_update_peer.rb")}", "-Ilib", "test/runner", "-v",
       "--exclude=#{EXCLUDED}"]
     out = IO.popen(run, command, chdir: project, err: File::NULL, &:read)
     File.write(ENV["PUMA_SUITE_LOG"], out) if ENV["PUMA_SUITE_LOG"]

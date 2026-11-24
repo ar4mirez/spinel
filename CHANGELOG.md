@@ -18,8 +18,10 @@ bytecode a tool reads.
   locked `puma 8.1.2` when `SPINEL_SUBSTITUTES=puma`, leaving the lockfile
   as Bundler wrote it; the Sinatra fixture serves on it beside
   nio4r-spinel, and Puma's own test suite ends test for test as it does on
-  CRuby 4.0.9, but for 33 tests neither run runs (rubygems.org access, a C
-  compiler, MRI-only checks). `gems/puma-spinel/build.rb` builds
+  CRuby 4.0.9, but for 21 tests neither run runs (rubygems.org access,
+  MRI-only checks); its TLS 1.3 KeyUpdate tests run with a Rust client in
+  place of the C one they compile
+  ([#867](https://github.com/ar4mirez/spinel/issues/867)). `gems/puma-spinel/build.rb` builds
   `puma-spinel-8.1.2.1-<platform>.gem`; it is not on rubygems.org yet.
 
 - **`nio4r-spinel`, the nio4r gem for Spinel**

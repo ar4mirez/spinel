@@ -56,9 +56,6 @@ const RUBYGEMS: &str = "https://rubygems.org";
 /// - `TestWorkerGemIndependence` (6 tests) bundle-installs json 2.7 and
 ///   nio4r 2.7 releases from rubygems.org, which a run offline cannot reach,
 ///   on CRuby either.
-/// - `TestPumaServerSSLKeyUpdate` (12 tests) compiles a C OpenSSL client
-///   with `RbConfig::CONFIG["CC"]`, which Spinel, building no C, does not
-///   name (#867).
 /// - `TestPluginSystemd#test_systemd_notify` and
 ///   `#test_systemd_cluster_notify` expect the 5 threads Puma defaults to on
 ///   MRI; Puma gives any other Ruby 16 (`Puma.mri? ? 5 : 16`).
@@ -73,8 +70,7 @@ const RUBYGEMS: &str = "https://rubygems.org";
 ///
 /// Spinel's `RUBY_ENGINE` is `"spinel"`: it does not report itself as MRI.
 #[cfg(target_os = "linux")]
-const EXCLUDED: &str = "/\\A(?:TestWorkerGemIndependence|TestPumaServerSSLKeyUpdate\
-                        |TestIntegrationSSLSession)#\
+const EXCLUDED: &str = "/\\A(?:TestWorkerGemIndependence|TestIntegrationSSLSession)#\
                         |\\A(?:TestPluginSystemd#test_systemd_(?:cluster_)?notify\
                         |TestIntegrationPumactl#test_control_gc_stats_(?:tcp|unix)\
                         |TestRackUp::RackUp#test_(?:bin|rackup1)\
@@ -630,13 +626,45 @@ p Puma::HAS_SSL, Puma::Const::PUMA_VERSION"#,
     );
 }
 
+/// The TLS 1.3 client `TestPumaServerSSLKeyUpdate` floods Puma's server
+/// with KeyUpdates from, which the test compiles from C with
+/// `RbConfig::CONFIG["CC"]`, a C compiler Spinel does not name (#867):
+/// `gems/puma-spinel/ext/puma_spinel/examples/key_update_peer.rs`, the C's
+/// OpenSSL calls in Rust, built by cargo into `build_gem`'s target
+/// directory, offline. Its path, for `PUMA_KEY_UPDATE_PEER`, which
+/// `fixtures/puma/key_update_peer.rb` hands the test in the C's place.
+#[cfg(target_os = "linux")]
+fn key_update_peer() -> PathBuf {
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("puma/target");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = scrubbed(Command::new(cargo));
+    command
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"))
+        .args(["--quiet", "--package", "puma-spinel", "--example"])
+        .arg("key_update_peer")
+        .arg("--target-dir")
+        .arg(&target)
+        .args(["--profile", "dev", "--offline", "--jobs", "2"]);
+    ok(
+        &command.output().expect("cargo runs"),
+        "cargo build key_update_peer",
+    );
+    let peer = target.join("debug/examples/key_update_peer");
+    assert!(peer.is_file(), "cargo wrote no {}", peer.display());
+    peer
+}
+
 /// Puma's own suite, every file under `test/` but the [`EXCLUDED`] tests,
 /// as its `test/runner` runs it from a checkout: the installed gem's `lib/`
 /// and `bin/` at the project's root, where the suite starts `bin/puma` with
-/// `-Ilib`. Each test ends as it ended on CRuby (`suite.txt`): passed, or
-/// skipped by the suite itself where it skipped there. Linux only: the
-/// suite runs and skips tests by platform, and `suite.txt` is Linux's. And
-/// only built with optimizations, as CI's Linux leg runs it.
+/// `-Ilib`; `TestPumaServerSSLKeyUpdate` with [`key_update_peer`]'s client
+/// in place of the C one it compiles, as the CRuby run had it. Each test
+/// ends as it ended on CRuby (`suite.txt`): passed, or skipped by the suite
+/// itself where it skipped there. Linux only: the suite runs and skips
+/// tests by platform, and `suite.txt` is Linux's. And only built with
+/// optimizations, as CI's Linux leg runs it.
 #[test]
 #[cfg(target_os = "linux")]
 fn pumas_own_suite_passes_as_on_cruby() {
@@ -650,6 +678,7 @@ fn pumas_own_suite_passes_as_on_cruby() {
         return;
     }
     let Installed { sandbox, .. } = installed("suite", "app", APP_INSTALLED, true);
+    let peer = key_update_peer();
 
     let written = sandbox.root.join("results.txt");
     let _ = fs::remove_file(&written);
@@ -657,6 +686,10 @@ fn pumas_own_suite_passes_as_on_cruby() {
         .spinel()
         .arg("-rbundler/setup")
         .arg(format!("-r{}", fixture().join("results.rb").display()))
+        .arg(format!(
+            "-r{}",
+            fixture().join("key_update_peer.rb").display()
+        ))
         .args(["-Ilib", "test/runner", "-v"])
         .arg(format!("--exclude={EXCLUDED}"))
         // minitest-retry, which Puma's own CI runs its suite with for the
@@ -667,6 +700,7 @@ fn pumas_own_suite_passes_as_on_cruby() {
         // against fixed sleeps, and a Ractor's threads take turns.
         .env("MT_CPU", "1")
         .env("PUMA_SUITE_RESULTS", &written)
+        .env("PUMA_KEY_UPDATE_PEER", &peer)
         .output()
         .unwrap();
     let printed = String::from_utf8_lossy(&out.stdout).into_owned();
