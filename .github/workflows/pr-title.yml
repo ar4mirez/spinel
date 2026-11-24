@@ -1,0 +1,21 @@
+name: PR title
+
+# Release notes are generated from PR titles, and GitHub turns a bare `@name`
+# in them into a user mention. Ruby instance variables must be in backticks.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  mentions:
+    name: no bare @-identifiers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The title goes through an env var, never into the script text.
+      - run: scripts/check-pr-title.sh
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
