@@ -157,6 +157,16 @@ jobs:
               --title "${GITHUB_REF_NAME}" --generate-notes
           fi
 
+  # The published release as `mise use -g github:ar4mirez/spinel` installs
+  # it on each platform. A release published with this run's token starts no
+  # other workflow, so `mise-install.yml`'s own `release` trigger misses it.
+  mise-install:
+    name: mise install
+    needs: publish
+    uses: ./.github/workflows/mise-install.yml
+    with:
+      version: ${{ github.ref_name }}
+
   # The end-to-end check #102 deferred to #886: on macOS, `spinel build
   # --target aarch64-linux` writes an app that the next job runs on Linux
   # arm64. After a tag's publish it fetches from the published release, the
