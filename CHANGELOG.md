@@ -148,8 +148,10 @@ bytecode a tool reads.
   once and cached under `~/.spinel/targets/<version>/<triple>/`. The
   download is checked to be an executable for the target. A gem with a
   native extension stops a cross build, naming the gem, and an app for macOS
-  is still built on macOS. `docs/build.md`, "Cross-compiling", has the
-  details.
+  is still built on macOS. The release binaries are published by
+  `.github/workflows/release.yml` on a `v*` tag
+  ([#886](https://github.com/ar4mirez/spinel/issues/886)).
+  `docs/build.md`, "Cross-compiling", has the details.
 
 - **A compiled app runs** ([#101](https://github.com/ar4mirez/spinel/issues/101)).
   An app `spinel build --compile` writes extracts its payload once, to
