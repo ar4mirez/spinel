@@ -51,8 +51,14 @@ spinel init                       # Gemfile, .ruby-version, test/, .gitignore
 spinel add sinatra rackup webrick # resolve, install, write Gemfile.lock
 
 cat > app.rb <<'RUBY'
-require "sinatra"
-get("/") { "Hello from #{RUBY_ENGINE} #{RUBY_ENGINE_VERSION}" }
+require "sinatra/base"
+
+class App < Sinatra::Base
+  set :server, "webrick"
+  get("/") { "Hello from #{RUBY_ENGINE} #{RUBY_ENGINE_VERSION}" }
+end
+
+App.run!
 RUBY
 spinel run app.rb                 # serves on http://localhost:4567
 ```
@@ -97,7 +103,7 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
 - **Platforms.** Linux x86_64 and aarch64, macOS x86_64 and arm64. CI builds Spinel and runs `cargo test` on Linux x86_64 and macOS arm64, and generates the ruby/spec table on Linux. There is no Windows support.
 - **C extensions.** CRuby C extensions do not load, and Spinel has no CRuby C API. `spinel install` does not compile gems' C extensions. The default gems that are C in CRuby are built in (see above). Other gems with C extensions need a Spinel-native replacement.
 - **Sinatra** works. It installs from rubygems.org and serves on WEBrick (`crates/spinel-cli/tests/install.rs`).
-- **Puma** runs through `puma-spinel` (with `nio4r-spinel`). On Linux, Puma's own test suite ends test for test as it does on CRuby 4.0.9, apart from tests that neither run can run (`tests/puma.rs`). Like the other Spinel-native gems in [`gems/`](gems/) (`sqlite3-spinel`, which a Sinatra app reads and writes SQLite through in `tests/sqlite3.rs`, and `pg-spinel`), it is **not published to rubygems.org yet**. Until it is, a project uses it only by building the gem, serving it from the project's gem source, and opting in with `SPINEL_SUBSTITUTES=puma,nio4r` ([docs/package-manager.md](docs/package-manager.md), section 6).
+- **Puma** runs through `puma-spinel` (with `nio4r-spinel`). On Linux, Puma's own test suite gets the same result as on CRuby 4.0.9, test for test, apart from tests that neither runtime can run (`tests/puma.rs`). Like the other Spinel-native gems in [`gems/`](gems/) (`sqlite3-spinel`, which a Sinatra app reads and writes SQLite through in `tests/sqlite3.rs`, and `pg-spinel`), it is **not published to rubygems.org yet**. Until it is, a project uses it only by building the gem, serving it from the project's gem source, and opting in with `SPINEL_SUBSTITUTES=puma,nio4r` ([docs/package-manager.md](docs/package-manager.md), section 6).
 - **Rails** does not boot yet. `spinel install` can install a `rails new` lockfile, but loading Rails waits on the `zeitwerk` and `activesupport` test suites passing ([#130](https://github.com/ar4mirez/spinel/issues/130)) and on a first boot ([#131](https://github.com/ar4mirez/spinel/issues/131)).
 
 ## Building from source
