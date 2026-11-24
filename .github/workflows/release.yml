@@ -208,9 +208,13 @@ jobs:
           path: ${{ runner.temp }}/out/mytool
           if-no-files-found: error
 
+  # Without a tag `publish` is skipped, and a job with a skipped job anywhere
+  # in its `needs` chain is skipped too unless its `if` checks a status
+  # itself, as `cross` does.
   cross-run:
     name: cross build runs (aarch64-linux)
     needs: cross
+    if: ${{ !cancelled() && needs.cross.result == 'success' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@v8
