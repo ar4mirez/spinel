@@ -74,6 +74,8 @@ mod tests {
 pub mod bignum;
 pub mod bytecode;
 pub mod callcache;
+pub mod cjk;
+pub mod cjk_table;
 pub mod class;
 pub mod codepage;
 pub mod codepage_table;
