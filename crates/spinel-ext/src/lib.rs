@@ -33,7 +33,7 @@
 //! crate-type = ["cdylib"]
 //!
 //! [dependencies]
-//! spinel-ext = "0.0.1"
+//! spinel-ext = "0.1.0"
 //! ```
 //!
 //! `src/lib.rs`:

@@ -1832,11 +1832,11 @@ dependencies = [
 
 [[package]]
 name = "spinel-ast"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "spinel-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "spinel-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "spinel-ast",
  "spinel-parse",
@@ -1874,18 +1874,18 @@ dependencies = [
 
 [[package]]
 name = "spinel-ext"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "spinel-jit"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "spinel-vm",
 ]
 
 [[package]]
 name = "spinel-parse"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ruby-prism",
  "ruby-prism-sys",
@@ -1895,11 +1895,11 @@ dependencies = [
 
 [[package]]
 name = "spinel-regex"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "spinel-vm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "corosensei",
  "libc",

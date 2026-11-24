@@ -21,7 +21,7 @@ pub const LANGUAGE_VERSION: &str = "4.0.0";
 ///
 /// Spinel's, not CRuby's: the day [`ENGINE_VERSION`] was cut. Set it together
 /// with the workspace version.
-pub const RELEASE_DATE: &str = "2026-09-03";
+pub const RELEASE_DATE: &str = "2026-11-24";
 
 /// Reported as `RUBY_COPYRIGHT`, shaped like CRuby's
 /// `ruby - Copyright (C) 1993-2025 Yukihiro Matsumoto`. The holder is `LICENSE`'s.
@@ -36,7 +36,7 @@ pub const PLATFORM: &str = env!("SPINEL_RUBY_PLATFORM");
 /// The one-line banner printed by `spinel --version`, and `RUBY_DESCRIPTION`.
 ///
 /// Shaped like `ruby -v` so a Ruby developer can read it without being told how:
-/// `spinel 0.0.1 (ruby 4.0.0) [arm64-darwin24]`.
+/// `spinel 0.1.0 (ruby 4.0.0) [arm64-darwin24]`.
 pub fn description() -> String {
     format!("{ENGINE} {ENGINE_VERSION} (ruby {LANGUAGE_VERSION}) [{PLATFORM}]")
 }
