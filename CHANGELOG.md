@@ -359,6 +359,22 @@ bytecode a tool reads.
   written by another build is ignored and rewritten. `docs/cli.md` has the
   rest.
 
+### Breaking: `spinel init` writes `.spinel-version`, not `.ruby-version`
+
+- **A new project no longer breaks mise, rbenv, asdf or chruby**
+  ([#902](https://github.com/ar4mirez/spinel/issues/902)). `spinel init`
+  wrote `.ruby-version` containing `spinel-<version>`, which those version
+  managers read as a CRuby to install or switch to, so `mise install` in a
+  fresh project failed with `no precompiled ruby found for
+  core:ruby@spinel-0.1.0`. It now writes `.spinel-version`, holding the bare
+  Spinel version (`0.1.0`), which only Spinel reads: `spinel run` warns when
+  it names a later Spinel, and `--strict-ruby-version` makes that an error,
+  as for `.ruby-version` and the Gemfile's `ruby` line. A `.ruby-version` is
+  still read as before, `spinel-<version>` included, so a project made by an
+  older `spinel init` keeps working; renaming that file to
+  `.spinel-version` keeps the check and takes it out of version managers'
+  sight.
+
 ### Breaking: the resolver is Bundler's
 
 - **The resolver is a port of Bundler's pubgrub-ruby**

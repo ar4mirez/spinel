@@ -1,15 +1,22 @@
 //! `spinel init`: scaffold a project in the current directory.
 //!
-//! Writes a `Gemfile`, a `.ruby-version` naming this Spinel, a `test/`
+//! Writes a `Gemfile`, a `.spinel-version` naming this Spinel, a `test/`
 //! directory, and a `.gitignore` entry for `.spinel/` (docs/cli.md). It never
 //! overwrites: a file that is already there is kept as it is, so running it in
 //! an existing project, or twice, is safe. The one file it may change is
 //! `.gitignore`, and only by appending the `.spinel/` line when no line already
 //! ignores that directory.
+//!
+//! It writes no `.ruby-version`: mise, rbenv, asdf and chruby read that file
+//! as a request for a CRuby, and fail on `spinel-<version>` (#902). The
+//! Spinel a project was made with goes in `.spinel-version`, which only
+//! Spinel reads (`ruby_version.rs`).
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
+
+use crate::ruby_version::{SPINEL_VERSION_FILE, spinel_version_file_contents};
 
 /// What `bundle init` writes, so the file reads the same to a Bundler user.
 const GEMFILE: &str = "\
@@ -44,12 +51,13 @@ impl Outcome {
 /// Scaffold `dir`, printing what happened to each path. Stops at the first
 /// error, having changed nothing it reported as untouched.
 pub fn run(dir: &Path) -> io::Result<()> {
-    let version = format!("spinel-{}\n", spinel_vm::ENGINE_VERSION);
-
     report("Gemfile", create_new(&dir.join("Gemfile"), GEMFILE)?);
     report(
-        ".ruby-version",
-        create_new(&dir.join(".ruby-version"), &version)?,
+        SPINEL_VERSION_FILE,
+        create_new(
+            &dir.join(SPINEL_VERSION_FILE),
+            &spinel_version_file_contents(),
+        )?,
     );
     report("test/", create_dir(&dir.join("test"))?);
     report(".gitignore", ignore_spinel(&dir.join(".gitignore"))?);

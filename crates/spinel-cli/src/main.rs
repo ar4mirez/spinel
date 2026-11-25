@@ -118,8 +118,9 @@ enum Command {
         #[arg(long)]
         dump_bytecode: bool,
 
-        /// Fail when the project's `.ruby-version` or Gemfile `ruby` directive
-        /// asks for a Ruby this build does not implement.
+        /// Fail when the project's `.spinel-version`, `.ruby-version` or
+        /// Gemfile `ruby` directive asks for a Spinel or Ruby this build does
+        /// not implement.
         ///
         /// Without it the mismatch is a warning and the program runs.
         #[arg(long)]
@@ -304,7 +305,7 @@ enum Command {
 
     /// Scaffold a project in the current directory.
     ///
-    /// Writes a Gemfile, a `.ruby-version` naming this Spinel, a `test/`
+    /// Writes a Gemfile, a `.spinel-version` naming this Spinel, a `test/`
     /// directory and a `.gitignore` entry for `.spinel/`. Anything already
     /// there is kept: nothing is overwritten.
     Init,

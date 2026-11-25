@@ -1,12 +1,19 @@
-//! The Ruby a project asks for: a Gemfile's `ruby` directive and a
-//! `.ruby-version` file (#73, docs/cli.md, "Language version").
+//! The Ruby a project asks for: a `.spinel-version` file, a `.ruby-version`
+//! file and a Gemfile's `ruby` directive (#73, #902, docs/cli.md, "Language
+//! version").
+//!
+//! `.spinel-version` is Spinel's own, what `spinel init` writes: mise, rbenv,
+//! asdf and chruby do not read it, so naming a Spinel there never sends them
+//! looking for a CRuby of that name, as `spinel-<version>` in `.ruby-version`
+//! does (#902). `.ruby-version` is still read, since a project
+//! may share one with CRuby or have been made by an older `spinel init`.
 //!
 //! Spinel implements one Ruby language version, so a project naming a CRuby
 //! version is read as "this app expects at least that Ruby". A request this
 //! build satisfies is silent; one it does not is a warning, never an error,
 //! unless `--strict-ruby-version` asks for the error (for CI).
 //!
-//! Both files are looked for from the current directory upward, the nearest
+//! Each file is looked for from the current directory upward, the nearest
 //! one winning, as `shims/setup.rb` looks for `.spinel/` and as Bundler and
 //! version managers look for theirs.
 
@@ -23,10 +30,26 @@ pub struct Mismatch {
     pub message: String,
 }
 
+/// The file `spinel init` writes to name the Spinel a project was made with.
+pub const SPINEL_VERSION_FILE: &str = ".spinel-version";
+
+/// What `spinel init` writes into [`SPINEL_VERSION_FILE`]: this Spinel's
+/// version, bare, as `.node-version` and `.python-version` hold theirs.
+pub fn spinel_version_file_contents() -> String {
+    format!("{ENGINE_VERSION}\n")
+}
+
 /// Every unsatisfied request found from `dir` upward: the nearest
-/// `.ruby-version`, then the nearest Gemfile's `ruby` directive.
+/// `.spinel-version`, the nearest `.ruby-version`, then the nearest Gemfile's
+/// `ruby` directive.
 pub fn check(dir: &Path) -> Vec<Mismatch> {
     let mut found = Vec::new();
+    if let Some(file) = nearest(dir, SPINEL_VERSION_FILE)
+        && let Ok(text) = std::fs::read_to_string(&file)
+        && let Some(message) = check_spinel_version_file(&text)
+    {
+        found.push(Mismatch { file, message });
+    }
     if let Some(file) = nearest(dir, ".ruby-version")
         && let Ok(text) = std::fs::read_to_string(&file)
         && let Some(message) = check_ruby_version_file(&text)
@@ -54,23 +77,40 @@ fn implemented() -> String {
     format!("{ENGINE} {ENGINE_VERSION} implements Ruby {LANGUAGE_VERSION}")
 }
 
+/// A `.spinel-version`'s first word: a Spinel version, bare (what `spinel
+/// init` writes) or as `spinel-<version>`, met by this Spinel or a later one.
+/// A bare `spinel` is always met; an empty file asks for nothing.
+fn check_spinel_version_file(text: &str) -> Option<String> {
+    let word = text.split_whitespace().next()?;
+    if word == ENGINE {
+        return None;
+    }
+    check_spinel_version(word, word.strip_prefix("spinel-").unwrap_or(word))
+}
+
+/// Whether this Spinel meets `version`, the Spinel version `word` names.
+fn check_spinel_version(word: &str, version: &str) -> Option<String> {
+    match parse_leniently(version) {
+        Some(wanted) if at_least(ENGINE_VERSION, &wanted) => None,
+        Some(_) => Some(format!(
+            "asks for Spinel {version}; this is {}",
+            implemented()
+        )),
+        None => Some(format!("names `{word}`, which is not a Spinel version")),
+    }
+}
+
 /// A `.ruby-version`'s first word, read as rbenv, chruby and asdf read it:
-/// `spinel-<version>` (what `spinel init` writes), `ruby-<version>` or a bare
-/// `<version>` naming CRuby, or another engine's `<engine>-<version>`.
+/// `spinel-<version>` (what `spinel init` wrote before #902), `ruby-<version>`
+/// or a bare `<version>` naming CRuby, or another engine's
+/// `<engine>-<version>`.
 fn check_ruby_version_file(text: &str) -> Option<String> {
     let word = text.split_whitespace().next()?;
     if word == ENGINE || word == "ruby" {
         return None;
     }
     if let Some(version) = word.strip_prefix("spinel-") {
-        return match parse_leniently(version) {
-            Some(wanted) if at_least(ENGINE_VERSION, &wanted) => None,
-            Some(_) => Some(format!(
-                "asks for Spinel {version}; this is {}",
-                implemented()
-            )),
-            None => Some(format!("names `{word}`, which is not a Spinel version")),
-        };
+        return check_spinel_version(word, version);
     }
     let version = word.strip_prefix("ruby-").unwrap_or(word);
     if version.starts_with(|c: char| c.is_ascii_digit()) {
@@ -198,8 +238,34 @@ mod tests {
 
     #[test]
     fn what_spinel_init_writes_is_satisfied() {
+        assert_eq!(
+            check_spinel_version_file(&spinel_version_file_contents()),
+            None
+        );
+    }
+
+    #[test]
+    fn what_an_older_spinel_init_wrote_is_still_satisfied() {
         let written = format!("spinel-{ENGINE_VERSION}\n");
         assert_eq!(check_ruby_version_file(&written), None);
+    }
+
+    #[test]
+    fn a_spinel_version_file_names_a_spinel_not_a_cruby() {
+        assert_eq!(check_spinel_version_file(ENGINE_VERSION), None);
+        assert_eq!(
+            check_spinel_version_file(&format!("spinel-{ENGINE_VERSION}")),
+            None
+        );
+        assert_eq!(check_spinel_version_file("0.0.1\n"), None);
+        assert_eq!(check_spinel_version_file("spinel\n"), None);
+        assert_eq!(check_spinel_version_file(""), None);
+        let later = check_spinel_version_file("999.0.0\n").expect("a later Spinel");
+        assert!(later.contains("Spinel 999.0.0"), "{later}");
+        assert!(check_spinel_version_file("spinel-999.0").is_some());
+        // A CRuby's name is not a Spinel version.
+        assert!(check_spinel_version_file("ruby-3.3.0").is_some());
+        assert!(check_spinel_version_file("head").is_some());
     }
 
     #[test]

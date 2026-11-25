@@ -42,7 +42,7 @@ fn read(path: PathBuf) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// The engine version the banner reports, which `.ruby-version` must name.
+/// The engine version the banner reports, which `.spinel-version` must name.
 fn engine_version() -> String {
     let out = Command::new(SPINEL)
         .arg("--version")
@@ -69,8 +69,8 @@ fn init_in_an_empty_directory_writes_each_file() {
     );
 
     assert_eq!(
-        read(dir.join(".ruby-version")),
-        format!("spinel-{}\n", engine_version())
+        read(dir.join(".spinel-version")),
+        format!("{}\n", engine_version())
     );
 
     assert!(dir.join("test").is_dir(), "test/ is created");
@@ -83,7 +83,27 @@ fn init_in_an_empty_directory_writes_each_file() {
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert_eq!(entries, [".gitignore", ".ruby-version", "Gemfile", "test"]);
+    assert_eq!(
+        entries,
+        [".gitignore", ".spinel-version", "Gemfile", "test"]
+    );
+}
+
+/// mise, rbenv, asdf and chruby read `.ruby-version` as a request for a CRuby,
+/// so a `spinel-<version>` there sends `mise install` looking for a CRuby
+/// named that, which fails (#902). A fresh project must not have one.
+#[test]
+fn init_writes_no_ruby_version() {
+    let scratch = Scratch::new("no-ruby-version");
+    let dir = &scratch.0;
+    let out = init_in(dir);
+
+    assert!(
+        !dir.join(".ruby-version").exists(),
+        "spinel init must not write .ruby-version"
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(!printed.contains(".ruby-version"), "{printed}");
 }
 
 #[test]
@@ -104,22 +124,24 @@ fn init_keeps_an_existing_gemfile() {
         "it says the Gemfile was kept: {printed}"
     );
     // The rest of the scaffold still lands.
-    assert!(dir.join(".ruby-version").is_file());
+    assert!(dir.join(".spinel-version").is_file());
     assert!(dir.join("test").is_dir());
     assert!(dir.join(".gitignore").is_file());
 }
 
 #[test]
-fn init_keeps_an_existing_ruby_version_and_test_dir() {
+fn init_keeps_existing_version_files_and_test_dir() {
     let scratch = Scratch::new("ruby-version");
     let dir = &scratch.0;
     fs::write(dir.join(".ruby-version"), "3.4.1\n").expect("write");
+    fs::write(dir.join(".spinel-version"), "0.0.1\n").expect("write");
     fs::create_dir(dir.join("test")).expect("mkdir");
     fs::write(dir.join("test/a_test.rb"), "# mine\n").expect("write");
 
     init_in(dir);
 
     assert_eq!(read(dir.join(".ruby-version")), "3.4.1\n");
+    assert_eq!(read(dir.join(".spinel-version")), "0.0.1\n");
     assert_eq!(read(dir.join("test/a_test.rb")), "# mine\n");
 }
 
@@ -151,14 +173,14 @@ fn init_twice_changes_nothing_the_second_time() {
     let scratch = Scratch::new("twice");
     let dir = &scratch.0;
     init_in(dir);
-    let before: Vec<String> = ["Gemfile", ".ruby-version", ".gitignore"]
+    let before: Vec<String> = ["Gemfile", ".spinel-version", ".gitignore"]
         .iter()
         .map(|f| read(dir.join(f)))
         .collect();
 
     let out = init_in(dir);
 
-    let after: Vec<String> = ["Gemfile", ".ruby-version", ".gitignore"]
+    let after: Vec<String> = ["Gemfile", ".spinel-version", ".gitignore"]
         .iter()
         .map(|f| read(dir.join(f)))
         .collect();
