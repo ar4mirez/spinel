@@ -508,9 +508,9 @@ struct Rare {
     /// Whether this frame's `:return` has fired, so that the unwind going on
     /// past it does not fire it again.
     trace_returned: bool,
-    /// The instruction an unwind out of this method's body was at when an
-    /// `ensure` it runs on its way out interrupted it: the line its
-    /// `:return` reports.
+    /// The instruction an unwind out of this method's body was at, kept from
+    /// the first `ensure` it runs on its way out: the line its `:return`
+    /// reports.
     trace_unwound_at: Option<usize>,
 }
 
@@ -5500,6 +5500,7 @@ fn unwind_to_handler(
             rare.trace_returned = true;
             rare.trace_owed = Some(Owed::Return(value));
             rare.trace_unwind = Some(unwind);
+            rare.trace_unwound_at.get_or_insert(at);
             return Ok(None);
         }
         let done = frames.pop().expect("a frame to unwind out of");
@@ -24766,13 +24767,14 @@ fn capture_binding(
     if let Some(frame) = index.and_then(|index| frames.get_mut(index)) {
         frame_env(scope, stack, frame);
     }
-    let Some(frame) = index.and_then(|index| frames.get(index)) else {
+    let Some(index) = index.filter(|&index| index < frames.len()) else {
         return Err(Error::NoDispatch {
             op: "binding",
             operands: "no Ruby frame to capture",
         });
     };
-    let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
+    let frame = &frames[index];
+    let line = frame.iseq.line_at(frame_insn(frames, index)).unwrap_or(0);
     let owner = frame
         .owner
         .map_or(Value::NIL, |owner| scope.class_object(owner));

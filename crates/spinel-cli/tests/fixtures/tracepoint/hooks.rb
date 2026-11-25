@@ -82,6 +82,33 @@ rescue => e
   note(:line_rescued, e.message, e.backtrace)
 end
 
+# A :line event's binding is at the event's line.
+def two_lines
+  a = 1
+  a + 1
+end
+bound = []
+TracePoint.new(:line) { |tp| bound << [tp.lineno, tp.binding.source_location[1]] }
+  .enable(target: method(:two_lines)) { two_lines }
+note(:binding_lines, bound)
+
+# A :line hook that raises out of a method: its :return is on that line.
+def stops_second
+  a = 1
+  a + 1
+end
+second_line = method(:stops_second).source_location[1] + 2
+stopped = []
+stopper = TracePoint.new(:line, :return) do |tp|
+  stopped << [tp.event, tp.lineno]
+  raise "stop" if tp.event == :line && tp.lineno == second_line
+end
+begin
+  stopper.enable(target: method(:stops_second)) { stops_second }
+rescue => e
+  note(:return_after_hook, e.message, stopped)
+end
+
 # Two TracePoints for one event: the newer's hook runs first.
 order = []
 first = TracePoint.new(:call) { |tp| order << [:first, tp.method_id] if tp.path == __FILE__ }
