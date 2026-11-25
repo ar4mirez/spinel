@@ -77,15 +77,12 @@ fn implemented() -> String {
     format!("{ENGINE} {ENGINE_VERSION} implements Ruby {LANGUAGE_VERSION}")
 }
 
-/// A `.spinel-version`'s first word: a Spinel version, bare (what `spinel
-/// init` writes) or as `spinel-<version>`, met by this Spinel or a later one.
-/// A bare `spinel` is always met; an empty file asks for nothing.
+/// A `.spinel-version`'s first word: a bare Spinel version, as `spinel init`
+/// writes it, met by this Spinel or a later one. An empty file asks for
+/// nothing.
 fn check_spinel_version_file(text: &str) -> Option<String> {
     let word = text.split_whitespace().next()?;
-    if word == ENGINE {
-        return None;
-    }
-    check_spinel_version(word, word.strip_prefix("spinel-").unwrap_or(word))
+    check_spinel_version(word, word)
 }
 
 /// Whether this Spinel meets `version`, the Spinel version `word` names.
@@ -253,16 +250,13 @@ mod tests {
     #[test]
     fn a_spinel_version_file_names_a_spinel_not_a_cruby() {
         assert_eq!(check_spinel_version_file(ENGINE_VERSION), None);
-        assert_eq!(
-            check_spinel_version_file(&format!("spinel-{ENGINE_VERSION}")),
-            None
-        );
         assert_eq!(check_spinel_version_file("0.0.1\n"), None);
-        assert_eq!(check_spinel_version_file("spinel\n"), None);
         assert_eq!(check_spinel_version_file(""), None);
         let later = check_spinel_version_file("999.0.0\n").expect("a later Spinel");
         assert!(later.contains("Spinel 999.0.0"), "{later}");
-        assert!(check_spinel_version_file("spinel-999.0").is_some());
+        // Only the bare version `spinel init` writes is a Spinel version here.
+        assert!(check_spinel_version_file(&format!("spinel-{ENGINE_VERSION}")).is_some());
+        assert!(check_spinel_version_file("spinel\n").is_some());
         // A CRuby's name is not a Spinel version.
         assert!(check_spinel_version_file("ruby-3.3.0").is_some());
         assert!(check_spinel_version_file("head").is_some());

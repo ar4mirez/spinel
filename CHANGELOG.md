@@ -371,9 +371,9 @@ bytecode a tool reads.
   it names a later Spinel, and `--strict-ruby-version` makes that an error,
   as for `.ruby-version` and the Gemfile's `ruby` line. A `.ruby-version` is
   still read as before, `spinel-<version>` included, so a project made by an
-  older `spinel init` keeps working; renaming that file to
-  `.spinel-version` keeps the check and takes it out of version managers'
-  sight.
+  older `spinel init` keeps working; replacing that file with a
+  `.spinel-version` holding the bare version keeps the check and takes it
+  out of version managers' sight.
 
 ### Breaking: the resolver is Bundler's
 
