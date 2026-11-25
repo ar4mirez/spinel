@@ -1,7 +1,8 @@
-//! A project's `.ruby-version` and Gemfile `ruby` directive (#73,
-//! docs/cli.md, "Language version"): a Ruby this build does not implement is a
-//! warning and the program still runs; `--strict-ruby-version` makes it an
-//! error; a Ruby it does implement, and what `spinel init` writes, say nothing.
+//! A project's `.spinel-version`, `.ruby-version` and Gemfile `ruby` directive
+//! (#73, #902, docs/cli.md, "Language version"): a Spinel or Ruby this build
+//! does not implement is a warning and the program still runs;
+//! `--strict-ruby-version` makes it an error; one it does implement, and what
+//! `spinel init` writes, say nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -134,6 +135,42 @@ fn a_prerelease_of_the_implemented_ruby_says_nothing_even_when_strict() {
 fn a_segment_past_u64_is_compared_not_rejected_even_when_strict() {
     let out = spinel_in(
         &fixture("big_segment"),
+        &["run", "--strict-ruby-version", "main.rb"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ran\n");
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn a_later_spinel_in_spinel_version_warns_and_strict_fails() {
+    let dir = fixture("newer_spinel");
+    let out = spinel_in(&dir, &["run", "main.rb"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ran\n");
+    let err = stderr(&out);
+    assert!(
+        err.contains("warning:") && err.contains(".spinel-version"),
+        "stderr: {err}"
+    );
+    assert!(err.contains("Spinel 999.0.0"), "stderr: {err}");
+
+    let out = spinel_in(&dir, &["run", "--strict-ruby-version", "main.rb"]);
+    assert!(!out.status.success());
+    assert_eq!(stdout(&out), "", "the program must not run");
+    let err = stderr(&out);
+    assert!(
+        err.contains(".spinel-version") && err.contains("--strict-ruby-version"),
+        "stderr: {err}"
+    );
+}
+
+/// A `.ruby-version` naming `spinel-<version>`, as `spinel init` wrote before
+/// #902, is still read as a Spinel request and met by this Spinel.
+#[test]
+fn a_spinel_ruby_version_from_an_older_init_says_nothing_even_when_strict() {
+    let out = spinel_in(
+        &fixture("legacy_init"),
         &["run", "--strict-ruby-version", "main.rb"],
     );
     assert!(out.status.success(), "stderr: {}", stderr(&out));

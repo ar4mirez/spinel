@@ -49,7 +49,7 @@ To build from source instead, see [Building from source](#building-from-source).
 
 ```sh
 mkdir hello && cd hello
-spinel init                       # Gemfile, .ruby-version, test/, .gitignore
+spinel init                       # Gemfile, .spinel-version, test/, .gitignore
 spinel add sinatra rackup webrick # resolve, install, write Gemfile.lock
 
 cat > app.rb <<'RUBY'
@@ -103,7 +103,7 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
 
 ## Compatibility
 
-- **Ruby version.** Spinel implements one language version at a time, currently Ruby 4.0: `RUBY_VERSION` is `"4.0.0"` and `RUBY_ENGINE` is `"spinel"`. Behavior is checked against ruby/spec first, then against CRuby 4.0.9. A `.ruby-version` or Gemfile `ruby` line that asks for another version only prints a warning, unless you pass `spinel run --strict-ruby-version` ([docs/cli.md](docs/cli.md)).
+- **Ruby version.** Spinel implements one language version at a time, currently Ruby 4.0: `RUBY_VERSION` is `"4.0.0"` and `RUBY_ENGINE` is `"spinel"`. Behavior is checked against ruby/spec first, then against CRuby 4.0.9. A `.ruby-version` or Gemfile `ruby` line that asks for a later Ruby, or a `.spinel-version` that asks for a later Spinel, only prints a warning, unless you pass `spinel run --strict-ruby-version` ([docs/cli.md](docs/cli.md)).
 - **Platforms.** Linux x86_64 and aarch64, macOS x86_64 and arm64. CI builds Spinel and runs `cargo test` on Linux x86_64 and macOS arm64, and generates the ruby/spec table on Linux. There is no Windows support.
 - **C extensions.** CRuby C extensions do not load, and Spinel has no CRuby C API. `spinel install` does not compile gems' C extensions. The default gems that are C in CRuby are built in (see above). Other gems with C extensions need a Spinel-native replacement.
 - **Sinatra** works. It installs from rubygems.org and serves on WEBrick (`crates/spinel-cli/tests/install.rs`).

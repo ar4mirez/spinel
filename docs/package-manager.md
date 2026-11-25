@@ -10,7 +10,7 @@ The package manager is Rust in `spinel-cli`. The only Ruby it runs (Gemfile and 
 |---|---|
 | `Gemfile` | Read. Evaluated as Ruby on Spinel's VM, never parsed by hand. |
 | `Gemfile.lock` | Read and written. Bundler must accept Spinel's output and vice versa. |
-| `.ruby-version` | Read. |
+| `.ruby-version` | Read, never written: `spinel init` records its Spinel in `.spinel-version`, which version managers do not read. See cli.md, "Language version". |
 | `GEM_HOME` layout (`specifications/`, `gems/`, `extensions/`, `bin/`) | Written to `.spinel/gem_home/`. Standard, so `Gem::Specification`, `Bundler.setup`, and every gem-aware library work unchanged. |
 | `~/.gem`, `~/.bundle/config` | Ignored, but for a source's credentials, read from the project's `.bundle/config`, the `BUNDLE_*` environment and the global config as Bundler reads them (section 2). `BUNDLE_GEMFILE` env var is honored. Mirrors (`bundle config mirror`) in phase 5. |
 | `ruby "x.y"` directive | Read, warns on mismatch. See cli.md, "Language version". |
