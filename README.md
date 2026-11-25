@@ -87,6 +87,8 @@ spinel -e 'puts RUBY_VERSION'     # ruby's own command-line flags work too
 
 A gem's executables are installed in `.spinel/gem_home/bin/`. Run one in the project with `spinel run .spinel/gem_home/bin/<name>` (for example `spinel run .spinel/gem_home/bin/puma`). `spinel x` runs a gem outside the project instead.
 
+[spinel-demo](https://github.com/ar4mirez/spinel-demo) is an example Spinel project: this quick start, a command-line tool and a Rack app on Puma, with run steps and a smoke test.
+
 ## What works today
 
 Each item below is covered by tests in this repository: ruby/spec under `spec/`, and integration tests in `crates/spinel-cli/tests/` that run the built `spinel` binary.
@@ -117,7 +119,6 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
   [spinel-demo](https://github.com/ar4mirez/spinel-demo) is a worked example of these steps.
 
   Until [#894](https://github.com/ar4mirez/spinel/issues/894) is fixed, `spinel install --frozen` rejects a lockfile whose gems come from a `source` block.
-- **Example apps.** [spinel-demo](https://github.com/ar4mirez/spinel-demo) collects example apps that run on Spinel.
 - **Rails** does not boot yet. `spinel install` can install a `rails new` lockfile, but loading Rails waits on the `zeitwerk` and `activesupport` test suites passing ([#130](https://github.com/ar4mirez/spinel/issues/130)) and on a first boot ([#131](https://github.com/ar4mirez/spinel/issues/131)).
 
 ## Building from source
