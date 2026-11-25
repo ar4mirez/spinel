@@ -62,7 +62,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/thread` | 55 | 398 | 390 | 0 | 5 | 3 | 98% |
 | `core/threadgroup` | 5 | 8 | 8 | 0 | 0 | 0 | 100% |
 | `core/time` | 66 | 652 | 634 | 0 | 5 | 13 | 97% |
-| `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
+| `core/tracepoint` | 19 | 76 | 55 | 0 | 21 | 0 | 72% |
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 21 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 33013 | 30933 | 0 | 1964 | 116 | 94% |
+| **total** | 3841 | 33013 | 30988 | 0 | 1909 | 116 | 94% |

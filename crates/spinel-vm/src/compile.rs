@@ -287,6 +287,16 @@ struct Compiler {
     source: Option<Arc<SourceMap>>,
     /// `(pc, line)` for [`Iseq::lines`], appended by `emit` when the line changes.
     lines: Vec<(u32, i32)>,
+    /// See [`Iseq::line_events`], appended by [`Compiler::line_event`].
+    line_events: Vec<(u32, u32)>,
+    /// The line of the last statement [`Compiler::line_event`] made an
+    /// event for: `prism_compile.c`'s `last_line`, one per body, so a
+    /// second statement on a line has none.
+    last_line_event: i32,
+    /// Set by [`Compiler::def_expr`] for the child it compiles next: the
+    /// body is an endless def's (`def f(x) = x + 1`), whose lone statement
+    /// Prism does not flag for a `:line` event (#127).
+    endless_def: bool,
     /// The line the next emitted instruction belongs to; 0 before any is known.
     line: i32,
     /// See [`Iseq::block_level`].
@@ -474,6 +484,9 @@ impl Compiler {
             name: name.into(),
             source: None,
             lines: Vec::new(),
+            line_events: Vec::new(),
+            last_line_event: 0,
+            endless_def: false,
             line: 0,
             block_level: 0,
             first_line: 0,
@@ -771,6 +784,7 @@ impl Compiler {
             scope_barrier: self.scope_barrier,
             path: self.source.as_ref().map(|source| Arc::from(&*source.path)),
             lines: self.lines,
+            line_events: self.line_events,
             block_level: self.block_level,
             first_line: self.first_line,
             outer: self.outer,
@@ -1114,15 +1128,64 @@ impl Compiler {
             if matches!(statement.kind, ExprKind::Defined(_)) {
                 continue;
             }
+            let event = self.statement_line_event(statement);
             self.discarded(statement)?;
+            self.close_loop_event(event, statement);
         }
         if !keep && matches!(last.kind, ExprKind::Defined(_)) {
             return Ok(());
         }
+        let event = self.statement_line_event(last);
         if keep {
-            self.expr(last)
+            self.expr(last)?;
         } else {
-            self.discarded(last)
+            self.discarded(last)?;
+        }
+        self.close_loop_event(event, last);
+        Ok(())
+    }
+
+    /// The `:line` event a statement of a statement list starts with, when
+    /// its line is one no statement of this body has started yet (#127).
+    /// Prism flags each such statement, and an `if` or `unless` wherever it
+    /// is, but never a `begin` or a parenthesised list, whose own statements
+    /// are flagged instead: CRuby 4.0.9 fires nothing for a `begin` line.
+    fn statement_line_event(&mut self, statement: &Expr) -> Option<usize> {
+        match statement.kind {
+            ExprKind::Begin(_) | ExprKind::Parens(_) => None,
+            _ => self.line_event(statement.span.start),
+        }
+    }
+
+    /// A `:line` event at the next instruction, for a node starting at
+    /// `offset`, unless the last one this body made was for the same line.
+    /// Answers its index in [`Compiler::line_events`]. A second statement
+    /// that starts at the same instruction — the first compiled to nothing —
+    /// shares the first's event, as CRuby's two events on one instruction
+    /// fire once.
+    fn line_event(&mut self, offset: u32) -> Option<usize> {
+        let line = self.source.as_ref()?.line(offset);
+        if line <= 0 || line == self.last_line_event {
+            return None;
+        }
+        self.last_line_event = line;
+        let pc = u32::try_from(self.here()).ok()?;
+        match self.line_events.last_mut() {
+            Some(last) if last.0 == pc => *last = (pc, 0),
+            _ => self.line_events.push((pc, 0)),
+        }
+        Some(self.line_events.len() - 1)
+    }
+
+    /// A `while` or `until` statement's event fires on the way into the loop
+    /// only: see [`Iseq::line_events`]. Its test, where the event is, is the
+    /// loop's first instruction, and everything up to here is the loop.
+    fn close_loop_event(&mut self, event: Option<usize>, statement: &Expr) {
+        if let (Some(index), ExprKind::While(node)) = (event, &statement.kind)
+            && !node.post
+        {
+            let end = u32::try_from(self.here()).unwrap_or(u32::MAX);
+            self.line_events[index].1 = end;
         }
     }
 
@@ -1410,7 +1473,13 @@ impl Compiler {
             }
             ExprKind::ShareableConstant(node) => self.expr(&shareable_write(node))?,
             ExprKind::Assign(assign) => self.assign(assign, span, true)?,
-            ExprKind::If(node) => self.if_expr(node)?,
+            // Prism flags an `if` or `unless` for a `:line` event wherever it
+            // is, not only as a statement (#127): a ternary on a line of its
+            // own inside a call's arguments has one.
+            ExprKind::If(node) => {
+                self.line_event(span.start);
+                self.if_expr(node)?;
+            }
             ExprKind::While(node) => self.while_expr(node)?,
             ExprKind::For(node) => self.for_expr(node, span)?,
             ExprKind::Case(node) => match &node.branches {
@@ -1487,8 +1556,13 @@ impl Compiler {
                         self.literal(Literal::Str(bytes.to_vec().into_boxed_slice(), encoding));
                     self.emit(Insn::PushLit(index));
                 }
+                // A lone statement in `#{}` is not one a `:line` event
+                // fires for, as Prism unflags it (#127); several are.
                 StrPart::Interp(exprs) => {
-                    self.statements(exprs, true)?;
+                    match exprs.as_slice() {
+                        [only] => self.expr(only)?,
+                        _ => self.statements(exprs, true)?,
+                    }
                     self.emit_send("to_s", 0);
                 }
             }
@@ -3342,6 +3416,7 @@ impl Compiler {
     /// cannot see the locals around the `def` — which is Ruby, and is the one
     /// place a nested scope differs from a block.
     fn def_expr(&mut self, def: &spinel_ast::Def, span: Span) -> Emit {
+        self.endless_def = def.endless;
         let child = self.child_iseq(&def.name, &def.params, &def.locals, &def.body, true, span)?;
         let name = self.symbol(&def.name);
         let index = self.push_child(child);
@@ -3816,6 +3891,7 @@ impl Compiler {
         lambda: bool,
         span: Span,
     ) -> Result<Iseq, Unsupported> {
+        let endless = std::mem::take(&mut self.endless_def);
         let mut child = Compiler::nested(name, locals, self, barrier);
         if let Some(source) = &self.source {
             child.first_line = source.line(span.start);
@@ -3833,7 +3909,20 @@ impl Compiler {
         // the binder can enter the body at the first default it has to compute
         // and fall through the rest. The body proper starts after them.
         child.emit_defaults(params, span)?;
-        child.statements(body, true)?;
+        // An endless def's body has no `:line` event of its own, measured on
+        // CRuby 4.0.10; an `if` in it, or the statements of a parenthesised
+        // body, still have theirs.
+        match body {
+            [only] if endless => child.expr(only)?,
+            _ => child.statements(body, true)?,
+        }
+        // A method's or class body's last `Leave` is on its `end` line, as
+        // CRuby's `leave` is: where a `:return` event says a body that falls
+        // off its end returned (#127), measured on 4.0.9. An explicit
+        // `return` is the `return`'s line.
+        if barrier && let Some(source) = &child.source {
+            child.line = source.line(span.end.saturating_sub(1));
+        }
         Ok(child.finish())
     }
 

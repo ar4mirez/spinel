@@ -518,6 +518,9 @@ pub enum Native {
     RefinedByCaller,
     /// `binding`, string `eval` and a `Binding`'s locals (#38).
     Binding(BindingOp),
+    /// What `core/trace_point.rb` is written over (#127). See `interp.rs`,
+    /// "TracePoint".
+    Trace(TraceOp),
     /// `Kernel#__load_file__(path, wrap)`: parse, compile and run a file at
     /// the top level, in a frame of its own (#39). `require` and `load` are
     /// Ruby around it.
@@ -1198,6 +1201,24 @@ pub enum SysOp {
     /// `__sys_locale_charmap__`: `nl_langinfo(CODESET)` for the locale the
     /// environment names, as CRuby reads it at startup.
     LocaleCharmap,
+}
+
+/// Which `TracePoint` primitive (#127).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceOp {
+    /// `Kernel#__trace_events__(mask)`: the events this Ractor's enabled
+    /// `TracePoint`s wait for, which the interpreter loop fires.
+    Events,
+    /// `Kernel#__trace_binding__(frame)`: a `Binding` of the frame an event
+    /// happened in, by its id, while the event's hook runs; nil once it is
+    /// gone.
+    Binding,
+    /// `Kernel#__trace_target__(body, events, line)`: what `enable(target:)`
+    /// hooks. See `interp.rs`, `trace_target`.
+    Target,
+    /// `Kernel#__trace_parameters__(frame)`: the parameters of the method a
+    /// `:call` or `:return` happened in, as `Method#parameters` lists them.
+    Parameters,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.
