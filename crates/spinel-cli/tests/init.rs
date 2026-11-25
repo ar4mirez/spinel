@@ -76,7 +76,7 @@ fn init_in_an_empty_directory_writes_each_file() {
     assert!(dir.join("test").is_dir(), "test/ is created");
 
     let gitignore = read(dir.join(".gitignore"));
-    assert!(gitignore.lines().any(|l| l == ".spinel/"), "{gitignore:?}");
+    assert_eq!(gitignore, ".spinel/\n.bundle/\n");
 
     let mut entries: Vec<String> = fs::read_dir(dir)
         .expect("readable")
@@ -154,18 +154,40 @@ fn init_appends_to_a_gitignore_without_the_entry() {
 
     init_in(dir);
 
-    assert_eq!(read(dir.join(".gitignore")), "/tmp\n*.log\n.spinel/\n");
+    assert_eq!(
+        read(dir.join(".gitignore")),
+        "/tmp\n*.log\n.spinel/\n.bundle/\n"
+    );
 }
 
 #[test]
 fn init_leaves_a_gitignore_that_already_has_the_entry() {
     let scratch = Scratch::new("gitignore-has");
     let dir = &scratch.0;
-    fs::write(dir.join(".gitignore"), "/.spinel\n*.log\n").expect("write");
+    fs::write(dir.join(".gitignore"), "/.spinel\n*.log\n.bundle\n").expect("write");
 
     init_in(dir);
 
-    assert_eq!(read(dir.join(".gitignore")), "/.spinel\n*.log\n");
+    assert_eq!(read(dir.join(".gitignore")), "/.spinel\n*.log\n.bundle\n");
+}
+
+/// `spinel install` writes `.bundle/config` (#900), so `init` ignores `.bundle/`
+/// too, appended only when no line decides about it: a negation is the
+/// project's choice to commit it, and stays the last word.
+#[test]
+fn init_appends_only_the_missing_bundle_entry_and_respects_a_negation() {
+    let scratch = Scratch::new("gitignore-bundle");
+    let dir = &scratch.0;
+    fs::write(dir.join(".gitignore"), ".spinel/\n").expect("write");
+    init_in(dir);
+    assert_eq!(read(dir.join(".gitignore")), ".spinel/\n.bundle/\n");
+    // A second run adds nothing.
+    init_in(dir);
+    assert_eq!(read(dir.join(".gitignore")), ".spinel/\n.bundle/\n");
+
+    fs::write(dir.join(".gitignore"), "!.bundle/\n").expect("write");
+    init_in(dir);
+    assert_eq!(read(dir.join(".gitignore")), "!.bundle/\n.spinel/\n");
 }
 
 #[test]

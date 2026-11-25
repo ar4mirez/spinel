@@ -306,8 +306,8 @@ enum Command {
     /// Scaffold a project in the current directory.
     ///
     /// Writes a Gemfile, a `.spinel-version` naming this Spinel, a `test/`
-    /// directory and a `.gitignore` entry for `.spinel/`. Anything already
-    /// there is kept: nothing is overwritten.
+    /// directory and `.gitignore` entries for `.spinel/` and `.bundle/`.
+    /// Anything already there is kept: nothing is overwritten.
     Init,
 
     /// Bring the compact index cache up to date, and print what each request
