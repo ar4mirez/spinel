@@ -26,6 +26,8 @@ mise use -g github:ar4mirez/spinel@0.1.0    # a pinned version
 spinel --version                            # spinel 0.1.0 (ruby 4.0.0) [x86_64-linux]
 ```
 
+mise does not install a release younger than its `minimum_release_age` setting (24 hours by default), so for the first day after a release the first line gets the release before it, or, while there is none, fails with `no versions found ... matching minimum_release_age`. Name the version instead, as in the second line. A project pins its own copy in its `mise.toml` with `mise use github:ar4mirez/spinel@0.1.0` (no `-g`).
+
 ### Download a binary
 
 Each release asset is the bare executable, with no archive around it, at `https://github.com/ar4mirez/spinel/releases/download/v<version>/spinel-<triple>`:
@@ -83,6 +85,8 @@ spinel -e 'puts RUBY_VERSION'     # ruby's own command-line flags work too
 
 `spinel install` installs from an existing `Gemfile.lock`, and `--frozen` refuses to change it, as Bundler's frozen mode does. Run `spinel help` to see every command.
 
+A gem's executables are installed in `.spinel/gem_home/bin/`. Run one in the project with `spinel run .spinel/gem_home/bin/<name>` (for example `spinel run .spinel/gem_home/bin/puma`). `spinel x` runs a gem outside the project instead.
+
 ## What works today
 
 Each item below is covered by tests in this repository: ruby/spec under `spec/`, and integration tests in `crates/spinel-cli/tests/` that run the built `spinel` binary.
@@ -103,7 +107,14 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
 - **Platforms.** Linux x86_64 and aarch64, macOS x86_64 and arm64. CI builds Spinel and runs `cargo test` on Linux x86_64 and macOS arm64, and generates the ruby/spec table on Linux. There is no Windows support.
 - **C extensions.** CRuby C extensions do not load, and Spinel has no CRuby C API. `spinel install` does not compile gems' C extensions. The default gems that are C in CRuby are built in (see above). Other gems with C extensions need a Spinel-native replacement.
 - **Sinatra** works. It installs from rubygems.org and serves on WEBrick (`crates/spinel-cli/tests/install.rs`).
-- **Puma** runs through `puma-spinel` (with `nio4r-spinel`). On Linux, Puma's own test suite gets the same result as on CRuby 4.0.9, test for test, apart from tests that neither runtime can run (`tests/puma.rs`). Like the other Spinel-native gems in [`gems/`](gems/) (`sqlite3-spinel`, which a Sinatra app reads and writes SQLite through in `tests/sqlite3.rs`, and `pg-spinel`), it is **not published to rubygems.org yet**. Until it is, a project uses it only by building the gem, serving it from the project's gem source, and opting in with `SPINEL_SUBSTITUTES=puma,nio4r` ([docs/package-manager.md](docs/package-manager.md), section 6).
+- **Puma** runs through `puma-spinel` (with `nio4r-spinel`). On Linux, Puma's own test suite gets the same result as on CRuby 4.0.9, test for test, apart from tests that neither runtime can run (`tests/puma.rs`). Like the other Spinel-native gems in [`gems/`](gems/) (`sqlite3-spinel`, which a Sinatra app reads and writes SQLite through in `tests/sqlite3.rs`, and `pg-spinel`), it is **not published to rubygems.org yet**. Until it is, you build both gems yourself and serve them from a gem source of your own ([docs/package-manager.md](docs/package-manager.md), section 6):
+  1. Clone Spinel at the tag of the `spinel` you run (`git clone --branch v0.1.0 https://github.com/ar4mirez/spinel`). Building needs what [Building from source](#building-from-source) needs.
+  2. In that clone, build both gems: `spinel run gems/nio4r-spinel/build.rb --out DIR` and `spinel run gems/puma-spinel/build.rb --out DIR`. They write `nio4r-spinel-2.7.5.1-<platform>.gem` and `puma-spinel-8.1.2.1-<platform>.gem`.
+  3. Serve a compact index, the format rubygems.org serves, with rubygems.org's `/info` lines for `puma` 8.1.2 and `nio4r` 2.7.5 (the versions the substitutes stand in for), lines for the two substitutes, and their `.gem` files. Spinel reads a substitute only from the source the locked gem comes from, so pin both gems to that source in the Gemfile: `source "http://127.0.0.1:9293" do gem "puma", "8.1.2"; gem "nio4r", "2.7.5" end`.
+  4. Install with `SPINEL_SUBSTITUTES=puma,nio4r spinel install`. `.spinel/substitutions.json` lists what was substituted, and the lockfile still names upstream's `puma` and `nio4r`. The gem source is needed whenever `spinel install` runs, not when the app does.
+  5. Start Puma with `spinel run .spinel/gem_home/bin/puma`.
+
+  [spinel-demo](https://github.com/ar4mirez/spinel-demo) does all of this in `bin/setup-puma`, `gem-source/` and `bin/smoke`. Until [#894](https://github.com/ar4mirez/spinel/issues/894) is fixed, `spinel install --frozen` rejects a lockfile whose gems come from a `source` block.
 - **Rails** does not boot yet. `spinel install` can install a `rails new` lockfile, but loading Rails waits on the `zeitwerk` and `activesupport` test suites passing ([#130](https://github.com/ar4mirez/spinel/issues/130)) and on a first boot ([#131](https://github.com/ar4mirez/spinel/issues/131)).
 
 ## Building from source

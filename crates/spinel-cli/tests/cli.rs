@@ -96,8 +96,12 @@ fn help_says_what_this_build_runs() {
         "help should say the engine runs Ruby: {help}"
     );
     assert!(
-        help.to_lowercase().contains("core library is minimal"),
-        "help should say how far the core library goes: {help}"
+        help.contains("see https://github.com/ar4mirez/spinel for what"),
+        "help should point at the README for what works today: {help}"
+    );
+    assert!(
+        !help.to_lowercase().contains("core library is minimal"),
+        "help should not describe the early, minimal core library: {help}"
     );
     assert!(
         help.contains("[OPTIONS]"),
