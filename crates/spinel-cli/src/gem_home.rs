@@ -32,8 +32,10 @@
 //! unpacked, and a gem's own files are shared through the symlink rather than
 //! copied. And extensions are not built (`spinel install` links the built-in
 //! gems in place of theirs, #83, and a listed gem's Spinel-native substitute
-//! in place of it, #112, each as a [`LocalLink`]): a gem that has some is
-//! linked with a warning, and RubyGems will say its extensions are not built.
+//! in place of it, #112, each as a [`LocalLink`]). `spinel install` fails on
+//! a stored gem that has some ([`unbuilt_extensions`], #898); elsewhere (`spinel
+//! fetch --gem-home`, `spinel x`, a git or path gem) such a gem is linked with a
+//! warning, and RubyGems will say its extensions are not built.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -163,6 +165,24 @@ pub struct LocalLink {
     pub bindir: Option<String>,
     pub executables: Vec<String>,
     pub extensions: Vec<String>,
+}
+
+/// The full name of each stored gem whose gemspec lists extensions: those
+/// Spinel does not build, so RubyGems would never activate the gem.
+/// `spinel install` fails on any (#898) before it links anything.
+pub fn unbuilt_extensions(gems: &[(GemId, PathBuf)]) -> Result<Vec<String>, Error> {
+    let mut unbuilt = Vec::new();
+    for (id, entry) in gems {
+        let spec = read_spec(id, entry)?;
+        let extensions = spec.extensions().map_err(|message| Error::Spec {
+            gem: id.full_name(),
+            message,
+        })?;
+        if !extensions.is_empty() {
+            unbuilt.push(id.full_name());
+        }
+    }
+    Ok(unbuilt)
 }
 
 /// Link each stored gem, given with its store entry, into `home`, and remove

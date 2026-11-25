@@ -369,6 +369,23 @@ bytecode a tool reads.
   written by another build is ignored and rewritten. `docs/cli.md` has the
   rest.
 
+### Breaking: `spinel install` fails on a C extension nothing stands in for
+
+- **A gem with a C extension and no substitute fails the install**
+  ([#898](https://github.com/ar4mirez/spinel/issues/898)). `spinel install`
+  and `spinel add` installed such a gem with a warning (`puma-8.1.2 has
+  extensions, which Spinel does not build: RubyGems will not activate it`)
+  and exited 0, and the project then failed to load: `require
+  "bundler/setup"` raised `Could not find puma-8.1.2, nio4r-2.7.5 in
+  locally installed gems (Bundler::GemNotFound)`. They now exit 1 before
+  anything is written, the GEM_HOME, the Gemfile and the lockfile left as
+  they were, with a line per such gem (`nio4r-2.7.5 has a C extension,
+  which Spinel does not build, and no Spinel-native substitute`) and the
+  link to the Spinel-native gems list. Built-in gems and gems a
+  Spinel-native substitute stands in for (`SPINEL_SUBSTITUTES`) install as
+  before; a git or path gem with extensions is still linked with the
+  warning. `docs/package-manager.md`, section 6, step 4, has the rest.
+
 ### Breaking: `spinel init` writes `.spinel-version`, not `.ruby-version`
 
 - **A new project no longer breaks mise, rbenv, asdf or chruby**
