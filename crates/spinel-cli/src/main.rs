@@ -1469,12 +1469,21 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         ("-e".to_owned(), code)
     } else {
         let mut script = args.script.clone().unwrap_or_else(|| "-".to_owned());
-        // `-S`: a bare name is looked for on `RUBYPATH`, then `PATH`.
+        // `-S`: a bare name is looked for on `RUBYPATH`, then `PATH`. Under
+        // `spinel run` that is the `PATH` the setup shim makes, with the
+        // project's `bin/` first; the shim runs only once the program is
+        // read, so that `bin/` is looked in here, where it would come.
         if args.search_path && !script.contains('/') && script != "-" {
-            let dirs = ["RUBYPATH", "PATH"]
-                .iter()
-                .filter_map(|name| std::env::var(name).ok())
-                .flat_map(|value| value.split(':').map(str::to_owned).collect::<Vec<_>>());
+            let var = |name: &str| -> Vec<String> {
+                std::env::var(name)
+                    .map(|value| value.split(':').map(str::to_owned).collect())
+                    .unwrap_or_default()
+            };
+            let mut dirs = var("RUBYPATH");
+            if setup && let Some(bin) = project_gem_bin() {
+                dirs.push(bin.to_string_lossy().into_owned());
+            }
+            dirs.extend(var("PATH"));
             for dir in dirs {
                 let candidate = Path::new(if dir.is_empty() { "." } else { &dir }).join(&script);
                 if candidate.is_file() {
@@ -1583,6 +1592,18 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
             setup,
         },
     )
+}
+
+/// The `bin/` of the nearest `.spinel/gem_home/` from the current directory
+/// upward: the directory `shims/setup.rb` puts first on `PATH`, found the way
+/// it finds it.
+fn project_gem_bin() -> Option<PathBuf> {
+    let start = std::env::current_dir().ok()?;
+    start
+        .ancestors()
+        .map(|dir| dir.join(".spinel").join("gem_home"))
+        .find(|gem_home| gem_home.is_dir())
+        .map(|gem_home| gem_home.join("bin"))
 }
 
 /// What a `ruby` command line adds around a program; all of it absent for
