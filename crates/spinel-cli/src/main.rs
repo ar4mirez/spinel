@@ -59,12 +59,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 const MILESTONES: &str = "https://github.com/ar4mirez/spinel/milestones";
 
-/// Shown under the options list. States plainly what this build does and does
-/// not do, so nobody installs it and wonders why `spinel app.rb` does nothing.
+/// Shown under the options list: what this build runs, and where to read what
+/// works today, which the README keeps current rather than this text.
 const AFTER_HELP: &str = "\
-This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
-String, Symbol, Array, Hash, Comparable — and a program that reaches past it
-says which method is missing rather than failing quietly.
+Spinel runs Ruby 4.0 programs; see https://github.com/ar4mirez/spinel for what
+works today.
 
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
