@@ -3,13 +3,16 @@
 # as `spinel run` runs a program. `ARGV` is the worker count the CLI chose
 # (`-j`, else the physical cores), the reporter (`--reporter`: `progress`,
 # `json` or `junit`), the file to record what failed in for `spinel test
-# --watch`, or an empty string, then the files it was given, each with an
-# optional `:LINE` after it; it is cleared before any test code can read it.
+# --watch`, or an empty string, then the paths it was given: files, each
+# with an optional `:LINE` after it, and directories; it is cleared before
+# any test code can read it.
 #
 # 1. Discovery: with no paths, `test/**/*_test.rb` (Minitest) and
 #    `spec/**/*_spec.rb` (RSpec), relative to the current directory, each
 #    sorted; a file given is a spec file when its name ends `_spec.rb`, else
-#    a Minitest file, and a path given that is not a file is an error. The
+#    a Minitest file, a directory given stands for every `*_test.rb` and
+#    `*_spec.rb` under it, sorted, and a path given that is neither is an
+#    error. The
 #    Minitest files run first, then the RSpec files. Each phase runs in a
 #    process of its own forked from this one, the RSpec one only after the
 #    Minitest one has ended, so neither framework's helper or `at_exit`
@@ -173,8 +176,12 @@ module Spinel
     end
 
     # The Minitest and RSpec files to run, each `[path, line]`, line nil for
-    # every test, from the files given, else discovered; or, when there are
-    # none or a path given is not one file once, why, as a String.
+    # every test, from the paths given, else discovered; or, when there are
+    # none or a path given is not a file or directory once, why, as a String.
+    # A directory given (#910) stands for every `*_test.rb` and `*_spec.rb`
+    # under it, sorted, as `rspec DIR` and `rails test DIR` take one; a file
+    # it brings in that is already there, given or brought in, is not added
+    # again, and a file given that one brought in narrows it to its line.
     def self.discover(args)
       found = {}
       if args.empty?
@@ -182,11 +189,24 @@ module Spinel
         Dir.glob("spec/**/*_spec.rb").sort.each { |path| found[path] = nil }
         return "no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb" if found.empty?
       else
+        from_directory = {}
         args.each do |arg|
+          if File.directory?(arg)
+            files = Dir.glob("**/*_{test,spec}.rb", base: arg).sort
+            return "no test files in #{arg}: nothing matches **/*_test.rb or **/*_spec.rb under it" if files.empty?
+            files.each do |file|
+              path = relative(File.join(arg, file))
+              next if found.key?(path)
+              found[path] = nil
+              from_directory[path] = true
+            end
+            next
+          end
           path, line = location(arg)
+          return "#{path} is a directory; a line number needs a file" if line && File.directory?(path)
           return "no such file: #{path}" unless File.file?(path)
           path = relative(path)
-          return "#{path} is given more than once" if found.key?(path)
+          return "#{path} is given more than once" if found.key?(path) && !from_directory.delete(path)
           found[path] = line
         end
       end

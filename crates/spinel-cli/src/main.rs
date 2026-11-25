@@ -160,8 +160,9 @@ enum Command {
         #[arg(long, value_enum, default_value_t = test_runner::Reporter::Progress)]
         reporter: test_runner::Reporter,
         /// Files to run instead of every test; `FILE:LINE` runs only the
-        /// test or example defined at or nearest above LINE.
-        #[arg(value_name = "FILE[:LINE]")]
+        /// test or example defined at or nearest above LINE, and a
+        /// directory every `*_test.rb` and `*_spec.rb` under it.
+        #[arg(value_name = "FILE[:LINE]|DIR")]
         paths: Vec<String>,
         /// Run the tests again whenever a file in the current directory
         /// changes.

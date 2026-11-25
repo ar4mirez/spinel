@@ -1080,7 +1080,15 @@ fn a_path_that_is_not_one_file_given_once_is_an_error() {
             &["test/missing_test.rb:3"][..],
             "no such file: test/missing_test.rb",
         ),
-        (&["test"][..], "no such file: test"),
+        (&["test/nowhere"][..], "no such file: test/nowhere"),
+        (
+            &["test:3"][..],
+            "test is a directory; a line number needs a file",
+        ),
+        (
+            &["lib"][..],
+            "no test files in lib: nothing matches **/*_test.rb or **/*_spec.rb under it",
+        ),
         (
             &["test/report_test.rb:8", "test/report_test.rb"][..],
             "test/report_test.rb is given more than once",
@@ -1093,6 +1101,93 @@ fn a_path_that_is_not_one_file_given_once_is_an_error() {
         assert_eq!(stdout(&output), "", "nothing ran: {args:?}");
         assert!(stderr(&output).contains(error), "{}", stderr(&output));
     }
+}
+
+/// `spinel test` with `args` in the `rspec` fixture, a project with both
+/// suites, on one worker: what exited, and the test and spec files that
+/// ran, each in the order it ran.
+fn ran_in_rspec_fixture(args: &[&str]) -> (Output, Vec<String>, Vec<String>) {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = scratch(&format!("directories-{call}"));
+    let log = dir.join("log");
+    let args: Vec<&str> = ["-j", "1"].iter().chain(args).copied().collect();
+    let output = spinel_test(&fixture("rspec"), &args, &log, &[]);
+    let lines = lines(&log);
+    std::fs::remove_dir_all(&dir).ok();
+    let named = |kind: &str| -> Vec<String> {
+        by_name(&lines, kind)
+            .into_iter()
+            .map(|(name, _)| name.to_owned())
+            .collect()
+    };
+    (output, named("file"), named("spec"))
+}
+
+#[test]
+fn a_directory_given_runs_the_test_and_spec_files_under_it() {
+    // #910: `spinel test spec` runs only the specs of a project with both,
+    // as `rspec spec` does, and `spinel test test` only the tests, as
+    // `rails test test` does; nested directories are searched, in sorted
+    // order, with or without a trailing slash.
+    for (args, tests, specs) in [
+        (&["spec"][..], &[][..], &["c_spec.rb", "d_spec.rb"][..]),
+        (&["spec/"][..], &[][..], &["c_spec.rb", "d_spec.rb"][..]),
+        (&["test"][..], &["a_test.rb", "b_test.rb"][..], &[][..]),
+        (&["test/"][..], &["a_test.rb", "b_test.rb"][..], &[][..]),
+        (&["spec/models"][..], &[][..], &["d_spec.rb"][..]),
+        (&["./spec/models/"][..], &[][..], &["d_spec.rb"][..]),
+        // A directory and a file mix, and a file a directory also brings
+        // in runs once.
+        (
+            &["spec/models", "test/b_test.rb"][..],
+            &["b_test.rb"][..],
+            &["d_spec.rb"][..],
+        ),
+        (
+            &["spec", "spec/models"][..],
+            &[][..],
+            &["c_spec.rb", "d_spec.rb"][..],
+        ),
+        (
+            &["spec/models/d_spec.rb", "spec"][..],
+            &[][..],
+            &["d_spec.rb", "c_spec.rb"][..],
+        ),
+    ] {
+        let (output, ran_tests, ran_specs) = ran_in_rspec_fixture(args);
+        let err = stderr(&output);
+        // `d_spec.rb`'s example fails; every other file passes.
+        let failed = specs.contains(&"d_spec.rb");
+        assert_eq!(output.status.success(), !failed, "{args:?}: {err}");
+        assert_eq!(ran_tests, tests, "{args:?}: {err}");
+        assert_eq!(ran_specs, specs, "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn a_file_given_with_a_directory_that_has_it_is_not_given_twice() {
+    // A file a directory also brings in, given with or without a line,
+    // runs once; the same file given twice is still an error.
+    for args in [
+        &["spec", "spec/c_spec.rb:4"][..],
+        &["spec/c_spec.rb", "spec"][..],
+    ] {
+        let (output, ran_tests, ran_specs) = ran_in_rspec_fixture(args);
+        let err = stderr(&output);
+        assert!(!err.contains("more than once"), "{args:?}: {err}");
+        assert!(ran_tests.is_empty(), "{args:?}: {err}");
+        assert_eq!(ran_specs, ["c_spec.rb", "d_spec.rb"], "{args:?}: {err}");
+    }
+    let (output, ran_tests, ran_specs) =
+        ran_in_rspec_fixture(&["spec/c_spec.rb", "spec/c_spec.rb:4"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(ran_tests.is_empty() && ran_specs.is_empty());
+    assert!(
+        stderr(&output).contains("spec/c_spec.rb is given more than once"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 /// Each discovery error `reporter` is given: the directory to run in, the
