@@ -696,7 +696,7 @@ fn dependency_to_lock(name: &str, requirement: &Requirement) -> String {
 
 impl SourceKind {
     /// `to_gemfile`: a git source's URI with the options it was given, a
-    /// path source's path, a rubygems source's remote.
+    /// path source's path, a rubygems source's `identifier`.
     pub fn to_gemfile(&self) -> String {
         match self {
             SourceKind::Git {
@@ -725,7 +725,15 @@ impl SourceKind {
                 }
             }
             SourceKind::Path { remote, .. } => remote.clone(),
-            SourceKind::Gem { remotes } => remotes.first().cloned().unwrap_or_default(),
+            // `Source::Rubygems#identifier`: its remotes, which it holds in
+            // the reverse of the lockfile's order.
+            SourceKind::Gem { remotes } if remotes.is_empty() => {
+                "locally installed gems".to_owned()
+            }
+            SourceKind::Gem { remotes } => {
+                let names: Vec<&str> = remotes.iter().rev().map(String::as_str).collect();
+                format!("rubygems repository {}", names.join(", "))
+            }
             SourceKind::Plugin { options } => options
                 .iter()
                 .find(|(k, _)| k == "remote")

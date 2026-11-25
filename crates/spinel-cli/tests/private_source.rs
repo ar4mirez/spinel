@@ -194,9 +194,15 @@ impl Sandbox {
     /// `spinel install`, with nothing of the environment's gems, proxies or
     /// Bundler settings, and `env` added.
     fn install(&self, env: &[(&str, &str)]) -> Output {
+        self.install_with(&[], env)
+    }
+
+    /// [`Sandbox::install`] with `args` after `install`.
+    fn install_with(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(SPINEL);
         command
             .arg("install")
+            .args(args)
             .current_dir(self.project())
             .env("SPINEL_HOME", self.root.join("home"))
             .env("HOME", self.root.join("user"));
@@ -470,4 +476,42 @@ fn a_scoped_private_source_beside_a_public_one_locks_as_bundler_does() {
     let out = sandbox.install(&env);
     assert_eq!(ok(&out, "second install"), "Nothing to change\n");
     assert_eq!(public.paths().len() + private.paths().len(), before);
+
+    // `--frozen` takes the lockfile it just wrote (#894): rackup is locked
+    // from the source the Gemfile scopes it to, as `BUNDLE_FROZEN=true
+    // bundle install` takes Bundler's.
+    let out = sandbox.install_with(&["--frozen"], &env);
+    assert_eq!(ok(&out, "frozen install"), "Nothing to change\n");
+    assert_eq!(public.paths().len() + private.paths().len(), before);
+
+    // A gem that did move between sources is one `--frozen` refuses, as
+    // `BUNDLE_FROZEN=true bundle install` 4.0.20 does with exit 16: rackup
+    // taken out of its block, and rack put into it.
+    let lock = sandbox.read("Gemfile.lock");
+    let frozen_refuses = |gemfile: String, headline: &str, change: &str| {
+        sandbox.write("Gemfile", &gemfile);
+        let out = sandbox.install_with(&["--frozen"], &env);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(16), "{}", text(&out));
+        assert!(
+            stderr.starts_with(&format!(
+                "{headline}, but the lockfile can't be updated because frozen mode is set\n\n\
+                 You have changed in the Gemfile:\n{change}\n"
+            )),
+            "{stderr}"
+        );
+        assert_eq!(sandbox.read("Gemfile.lock"), lock);
+    };
+    frozen_refuses(
+        format!("source {public_url:?}\ngem \"rack\"\ngem \"rackup\"\n"),
+        "The list of sources changed",
+        &format!("* rackup from `rubygems repository {private_url}/` to `no specified source`"),
+    );
+    frozen_refuses(
+        format!(
+            "source {public_url:?}\nsource {private_url:?} do\n  gem \"rack\"\n  gem \"rackup\"\nend\n"
+        ),
+        "Some dependencies were deleted from your gemfile",
+        &format!("* rack from `no specified source` to `rubygems repository {private_url}/`"),
+    );
 }
