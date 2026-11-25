@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test DIR` runs the tests and specs under a directory**
+  ([#910](https://github.com/ar4mirez/spinel/issues/910)). A directory
+  given, with or without a trailing slash, stands for every `*_test.rb` and
+  `*_spec.rb` under it, nested directories included, in sorted order, as
+  `rspec spec` and `rails test test/models` take one, and mixes with
+  `FILE[:LINE]` arguments: `spinel test spec` runs only the specs of a
+  project with both suites. A directory with none under it is reported as
+  `no test files in DIR`; a path that is neither a file nor a directory is
+  still `no such file`.
+
 - **`puma-spinel`, the puma gem for Spinel; the Sinatra fixture serves on Puma**
   ([#116](https://github.com/ar4mirez/spinel/issues/116)).
   `gems/puma-spinel/` is Puma 8.1.2's Ruby API, upstream's `lib/` and
