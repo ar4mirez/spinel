@@ -56,6 +56,8 @@ pub struct Locals<'a> {
     /// The remotes of the rubygems sources scoped to some gems (#89), as
     /// written.
     pub scoped: &'a [String],
+    /// For each Gemfile dependency, the one of `scoped` it is pinned to.
+    pub scoped_pins: &'a [Option<usize>],
 }
 
 impl Locals<'static> {
@@ -67,6 +69,7 @@ impl Locals<'static> {
             pins: &[],
             project: Path::new(""),
             scoped: &[],
+            scoped_pins: &[],
         }
     }
 }
@@ -561,15 +564,22 @@ impl Definition {
 
         // `lockfile_changes_summary`'s changed sources: a gem the Gemfile
         // and the lockfile both list, from sources that are not the same
-        // (`include?`), as `to_gemfile` names them.
+        // (`lock_source.include?(gemfile_source)`), as `to_gemfile` names
+        // them. A gem with no source of its own is the default source's,
+        // the global rubygems one; so is a lockfile dependency with no `!`.
+        // A rubygems source includes another whose remotes it all has, and
+        // nothing else.
+        let default_remotes = lockfile::gem_remotes(remote);
+        let rubygems_includes =
+            |ours: &[String], theirs: &[String]| theirs.iter().all(|r| ours.contains(r));
         let mut source_moves = Vec::new();
-        for (dep, pin) in dependencies
-            .iter()
-            .zip(locals.pins.iter().chain(std::iter::repeat(&None)))
-        {
+        for (i, dep) in dependencies.iter().enumerate() {
             let Some(lock_dep) = lock.dependencies.iter().find(|d| d.name == dep.name) else {
                 continue;
             };
+            let pin = locals.pins.get(i).copied().flatten();
+            let scoped_pin = locals.scoped_pins.get(i).copied().flatten();
+            let scoped_remotes = scoped_pin.map(|j| lockfile::gem_remotes(&locals.scoped[j]));
             let lock_source = lock_dep
                 .pinned
                 .then(|| {
@@ -578,24 +588,38 @@ impl Definition {
                         .position(|s| s.specs.iter().any(|sp| sp.name == dep.name))
                 })
                 .flatten();
-            let same = match (*pin, lock_source) {
-                (None, None) => true,
-                (Some(i), Some(at)) => {
-                    matched[i] == Some(at)
-                        || locals.sources[i]
-                            .kind
-                            .includes_locked(&lock.sources[at].kind, locals.project)
+            // The Gemfile's source, as rubygems remotes when it is one.
+            let gemfile_remotes = match (pin, &scoped_remotes) {
+                (Some(_), _) => None,
+                (None, Some(remotes)) => Some(remotes.as_slice()),
+                (None, None) => Some(default_remotes.as_slice()),
+            };
+            let same = match lock_source.map(|at| (at, &lock.sources[at].kind)) {
+                None => gemfile_remotes.is_some_and(|g| rubygems_includes(&default_remotes, g)),
+                Some((_, SourceKind::Gem { remotes })) => {
+                    gemfile_remotes.is_some_and(|g| rubygems_includes(remotes, g))
                 }
-                _ => false,
+                Some((at, kind)) => pin.is_some_and(|i| {
+                    matched[i] == Some(at)
+                        || locals.sources[i].kind.includes_locked(kind, locals.project)
+                }),
             };
             if !same {
-                let named =
-                    |s: Option<String>| s.unwrap_or_else(|| "no specified source".to_owned());
+                let gemfile_name = match (pin, &scoped_remotes) {
+                    (Some(i), _) => locals.sources[i].kind.to_gemfile(),
+                    (None, Some(remotes)) => SourceKind::Gem {
+                        remotes: remotes.clone(),
+                    }
+                    .to_gemfile(),
+                    (None, None) => "no specified source".to_owned(),
+                };
+                let lock_name = lock_source.map_or_else(
+                    || "no specified source".to_owned(),
+                    |at| lock.sources[at].kind.to_gemfile(),
+                );
                 source_moves.push(format!(
-                    "* {} from `{}` to `{}`",
+                    "* {} from `{lock_name}` to `{gemfile_name}`",
                     dep.name,
-                    named(lock_source.map(|at| lock.sources[at].kind.to_gemfile())),
-                    named(pin.map(|i| locals.sources[i].kind.to_gemfile())),
                 ));
             }
         }

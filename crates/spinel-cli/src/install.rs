@@ -114,6 +114,9 @@ pub(crate) struct Prepared {
     /// The rubygems sources scoped to some gems (`source "..." do`, or
     /// `gem ..., source:`, #89), in the Gemfile's order.
     pub scoped: Vec<ScopedSource>,
+    /// For each of the request's dependencies, the one of `scoped` it is
+    /// pinned to, if any.
+    pub scoped_pins: Vec<Option<usize>>,
 }
 
 /// A rubygems source scoped to some gems.
@@ -164,7 +167,9 @@ pub(crate) fn prepare(
     let (sources, pins) = local_source::declared(&declared, &names, &project)?;
     let mut dependencies = Vec::new();
     let mut scoped: Vec<ScopedSource> = Vec::new();
+    let mut scoped_pins: Vec<Option<usize>> = Vec::new();
     for (dep, pin) in gemfile.dependencies.iter().zip(&pins) {
+        let mut scoped_pin = None;
         if pin.is_none() && dep.source.as_ref().is_some_and(|s| !s.is_null()) {
             let source = dep.source.as_ref().expect("checked above");
             let rubygems =
@@ -193,7 +198,9 @@ pub(crate) fn prepare(
             if !scoped[at].pinned.contains(&dep.name) {
                 scoped[at].pinned.push(dep.name.clone());
             }
+            scoped_pin = Some(at);
         }
+        scoped_pins.push(scoped_pin);
         let requirement =
             gem_requirement::Requirement::new(dep.requirements.iter().map(String::as_str))
                 .map_err(|err| format!("{}: {err}", dep.name))?;
@@ -248,6 +255,7 @@ pub(crate) fn prepare(
         sources,
         pins,
         scoped,
+        scoped_pins,
     })
 }
 
@@ -862,6 +870,7 @@ impl Session {
                 pins: &self.prepared.pins,
                 project: &self.root,
                 scoped: &scoped_remotes,
+                scoped_pins: &self.prepared.scoped_pins,
             },
         )
         .map_err(|err| {
