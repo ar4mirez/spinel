@@ -780,6 +780,7 @@ impl Wire for Iseq {
             scope_barrier,
             path,
             lines,
+            line_events,
             block_level,
             first_line,
             outer,
@@ -809,6 +810,7 @@ impl Wire for Iseq {
         scope_barrier.put(w);
         path.put(w);
         lines.put(w);
+        line_events.put(w);
         block_level.put(w);
         first_line.put(w);
         outer.put(w);
@@ -843,6 +845,7 @@ impl Wire for Iseq {
             scope_barrier: Wire::get(r)?,
             path: Wire::get(r)?,
             lines: Wire::get(r)?,
+            line_events: Wire::get(r)?,
             block_level: Wire::get(r)?,
             first_line: Wire::get(r)?,
             outer: Wire::get(r)?,

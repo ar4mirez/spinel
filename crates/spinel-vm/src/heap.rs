@@ -551,6 +551,12 @@ pub struct Heap {
     /// a `_stop` (#690). While it is nonzero, every object Ruby can see is
     /// noted in `fresh_allocations` as it is allocated.
     allocation_tracing: u32,
+    /// The events some enabled `TracePoint` of this Ractor waits for (#127),
+    /// as the bits `interp.rs`'s `TRACE_LINE` and the rest name: the union
+    /// `core/trace_point.rb` keeps current through `__trace_events__`. Zero
+    /// while none is enabled, which is what the interpreter loop reads to
+    /// leave its fast paths and look for events at every instruction.
+    trace_events: u8,
     /// Objects allocated since the interpreter last stamped them with where
     /// it was. The allocator cannot see the frame stack, so it leaves the
     /// address here and the loop, which can, files it under the instruction
@@ -988,6 +994,7 @@ impl Heap {
             finalizers: HashMap::new(),
             pending_finalizers: Vec::new(),
             allocation_tracing: 0,
+            trace_events: 0,
             fresh_allocations: Vec::new(),
             allocation_sites: HashMap::new(),
         }
@@ -3172,6 +3179,17 @@ impl<'h> HandleScope<'h> {
     /// Whether allocation tracing is on.
     pub(crate) fn tracing_allocations(&self) -> bool {
         self.heap.allocation_tracing != 0
+    }
+
+    /// The `TracePoint` events this Ractor's enabled ones wait for (#127):
+    /// see `Heap::trace_events`.
+    pub(crate) fn trace_events(&self) -> u8 {
+        self.heap.trace_events
+    }
+
+    /// Set what [`HandleScope::trace_events`] answers.
+    pub(crate) fn set_trace_events(&mut self, events: u8) {
+        self.heap.trace_events = events;
     }
 
     /// Whether objects allocated since the loop last looked are waiting to

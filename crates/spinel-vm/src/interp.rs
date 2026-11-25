@@ -49,7 +49,7 @@ use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
     BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IvarOp,
-    Native, OpenSslOp, PsychOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
+    Native, OpenSslOp, PsychOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp, TraceOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -442,9 +442,20 @@ struct Call {
     owner: Option<ClassId>,
     /// See [`Call::owner`].
     defined_as: Option<SymbolId>,
+    /// What a `TracePoint` sees of this frame (#127): [`FRAME_METHOD`] for
+    /// a method's body, which has `:call` and `:return` events,
+    /// [`FRAME_CLASS`] for a `class` or `module` body, which has `:class`,
+    /// and [`FRAME_ENTRY`] while the `:call` or `:class` it was pushed with,
+    /// under an enabled `TracePoint`, has not fired. One byte, in what the
+    /// frame's other bytes leave of its 128.
+    trace: u8,
     /// What few frames hold: see [`Rare`]. `None` until one does.
     rare: Option<Box<Rare>>,
 }
+
+// What every call pushes and every return pops stays within the 128 bytes the
+// loop's frame writes were measured at (see `Rare`).
+const _: () = assert!(std::mem::size_of::<Call>() <= 128);
 
 /// The parts of a [`Call`] that only some frames ever set — a `catch`, a
 /// `rescue` or an `ensure` running in it, a refusal boundary, a native's
@@ -474,6 +485,32 @@ struct Rare {
     boundary_limit: u64,
     /// What a backtrace calls this frame, when a native pushed it (#711).
     shown: Shown,
+    /// The `TracePoint` events already fired before the instruction at a
+    /// `pc` (#127), as `(pc, events)`: a hook runs as a frame on top of this
+    /// one, which comes back to the same instruction when it returns, and
+    /// goes on to the next event there or runs it.
+    trace_done: Option<(usize, u8)>,
+    /// An event the unwinder owes this frame, which its loop fires, since
+    /// the unwinder cannot push the hook's frame itself: its `:return` on
+    /// the way out, or a `:raise` the core library started above it.
+    trace_owed: Option<Owed>,
+    /// A `:raise` the core library started above this frame, owed here if
+    /// the unwind reaches it: see [`CoreRaise`].
+    trace_raise: Option<CoreRaise>,
+    /// What the primitive this frame called and that raised was: see
+    /// [`TraceFrom`].
+    trace_from: Option<TraceFrom>,
+    /// The unwind a hook's frame interrupted — a `:raise` fired where the
+    /// exception started, a `:return` on its way out — which goes on when
+    /// the hook returns. Dropped if anything lands in this frame first.
+    trace_unwind: Option<Unwind>,
+    /// Whether this frame's `:return` has fired, so that the unwind going on
+    /// past it does not fire it again.
+    trace_returned: bool,
+    /// The instruction an unwind out of this method's body was at when an
+    /// `ensure` it runs on its way out interrupted it: the line its
+    /// `:return` reports.
+    trace_unwound_at: Option<usize>,
 }
 
 impl Call {
@@ -595,6 +632,9 @@ enum Step {
     Done(Value),
     /// Control is leaving this instruction's frame abnormally.
     Unwind(Unwind),
+    /// An unwind an `ensure` interrupted goes on: the same as `Unwind`, but
+    /// no exception starts here, so no `TracePoint` sees a `:raise` (#127).
+    Resume(Unwind),
 }
 
 /// A reason control is leaving a frame, travelling up the frame stack.
@@ -2576,6 +2616,7 @@ pub fn eval_in(
         // start from and raises rather than resolving to something.
         owner: None,
         defined_as: None,
+        trace: 0,
         rare: None,
     }];
     // Frame ids, handed out in order. Zero means "no such frame", which is what
@@ -2641,7 +2682,17 @@ fn run<'h>(
     } else {
         0
     };
-    let mut limit = deadline.max(slice_end).max(trace_floor);
+    // An enabled `TracePoint` (#127) pins the limit the same way, so that
+    // every instruction goes through `tracepoint_step` first, and keeps the
+    // loop off its fast paths: see "TracePoint" below. `traced_last` is the
+    // frame and `pc` of the last instruction it stepped.
+    let mut tp_floor: u64 = if scope.trace_events() != 0 {
+        u64::MAX
+    } else {
+        0
+    };
+    let mut traced_last: (u64, usize) = (0, 0);
+    let mut limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
 
     // Everything the loop roots from here on is released between
     // instructions, a batch at a time: see `release_roots`.
@@ -2698,6 +2749,23 @@ fn run<'h>(
             }
             if frames.len() != seen_frames {
                 sync_out!();
+                // A `TracePoint` hook that returned to a frame whose unwind
+                // it interrupted (#127): the unwind goes on, whether or not
+                // the hook left a `TracePoint` enabled.
+                if let Some(unwind) = frames
+                    .last_mut()
+                    .and_then(|frame| frame.rare.as_deref_mut())
+                    .filter(|rare| rare.trace_owed.is_none())
+                    .and_then(|rare| rare.trace_unwind.take())
+                {
+                    if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    {
+                        break value;
+                    }
+                    tp_floor = tp_floor.max(trace_floor_for(scope));
+                    reload!();
+                    continue;
+                }
                 // A call or a return (#36). `GC.start` collects here rather
                 // than inside its native, once the handles taken for
                 // finished instructions are let go, so an object only they
@@ -2741,6 +2809,14 @@ fn run<'h>(
                     slice_end = budget.saturating_sub(1);
                 }
                 seen_frames = frames.len();
+                // `TracePoint#enable` and `#disable` are methods, so this loop
+                // sees them here, at the return from one, as it sees
+                // allocation tracing start (#127).
+                let wanted = trace_floor_for(scope);
+                if wanted != tp_floor {
+                    tp_floor = wanted;
+                    traced_last = (0, 0);
+                }
                 // With no boundary anywhere and none to start, there is
                 // nothing for the refresh to find: its answer is zero.
                 deadline = if boundaries.is_empty()
@@ -2752,7 +2828,7 @@ fn run<'h>(
                 } else {
                     refresh_boundaries(scope, &frames, &mut boundaries, budget)
                 };
-                limit = deadline.max(slice_end).max(trace_floor);
+                limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
                 reload!();
             }
             budget = budget.saturating_sub(1);
@@ -2760,7 +2836,7 @@ fn run<'h>(
                 sync_out!();
                 if trace_floor != 0 && !trace_step(scope, &frames, &mut traced_top) {
                     trace_floor = 0;
-                    limit = deadline.max(slice_end);
+                    limit = deadline.max(slice_end).max(tp_floor);
                 }
                 // Past the floor, only tracing sent this instruction here.
                 if budget <= deadline.max(slice_end) {
@@ -2771,7 +2847,7 @@ fn run<'h>(
                         // Ractor's write waits for this one, and this one's
                         // write ends here.
                         scope.class_safe_point();
-                        limit = deadline.max(slice_end).max(trace_floor);
+                        limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
                         seen_frames = usize::MAX;
                         // A signal that arrived is handled here, a safe point
                         // between two instructions of the main thread (#44):
@@ -2791,7 +2867,7 @@ fn run<'h>(
                                 // The look itself runs no instruction, so
                                 // at least one runs before the next.
                                 slice_end = budget.saturating_sub(SIGNAL_RECHECK + 1);
-                                limit = deadline.max(slice_end).max(trace_floor);
+                                limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
                             } else {
                                 let object = Builtin::Object.id();
                                 let name = crate::shared::symbols::intern("Signal");
@@ -2851,6 +2927,48 @@ fn run<'h>(
                     }
                     reload!();
                     continue;
+                }
+                // An event this instruction owes an enabled `TracePoint`
+                // (#127) fires before it runs, as a hook frame on top.
+                if tp_floor != 0 {
+                    let traced = tracepoint_step(
+                        scope,
+                        &mut stack,
+                        &mut frames,
+                        proc_class,
+                        &mut ids,
+                        &mut traced_last,
+                    );
+                    let unwind = match traced {
+                        Ok(Traced::Run) => None,
+                        Ok(Traced::Pushed) => {
+                            reload!();
+                            continue;
+                        }
+                        Ok(Traced::Resume(unwind)) => Some(unwind),
+                        Err(Error::Raise { class, message }) => {
+                            Some(Unwind::Exception(exception_new(scope, class, &message)))
+                        }
+                        Err(other) => {
+                            seen_frames = usize::MAX;
+                            Some(refuse(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                &mut boundaries,
+                                other,
+                            )?)
+                        }
+                    };
+                    if let Some(unwind) = unwind {
+                        if let Some(value) =
+                            unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                        {
+                            break value;
+                        }
+                        reload!();
+                        continue;
+                    }
                 }
                 reload!();
             }
@@ -2923,6 +3041,7 @@ fn run<'h>(
                     && deadline == 0
                     && boundaries.is_empty()
                     && trace_floor == 0
+                    && tp_floor == 0
                     && !scope.collection_requested()
                     && !scope.tracing_allocations()
                     && !scope.has_pending_finalizers()
@@ -2951,151 +3070,160 @@ fn run<'h>(
             }
 
             // The rest of the instructions answered before the closure: the
-            // ones that change the frames, so cannot run light.
-            match insn {
-                // The call most sends are — see `send_simple`. Anything it
-                // does not take is the closure's, untouched.
-                // A site whose plan has said no — a native's, for one — says
-                // it again for as long as its entry holds what it said it
-                // for, and a refill forgets it: such a send goes straight to
-                // the closure's `dispatch`, without the fast path's lookups.
-                //
-                // A primitive with a light form is answered where it stands,
-                // allocating if it must — the stack was rooted at the top of
-                // the loop — since `run_calls` declines one that would. No
-                // frame changed.
-                //
-                // A receiver of the class the site's cache holds behind its
-                // entry brings that entry back, and the fast paths are tried
-                // once more for it, out of line: see `send_promoted`.
-                // `run_calls` has done that already for a call it declined.
-                Insn::Send(index) => {
-                    sync_out!();
-                    let slot = frames[top].cache_base + index;
-                    let declined = std::mem::take(&mut declined);
-                    match scope.call_caches().plan(slot) {
-                        Plan::General => {}
-                        Plan::Native(_) => {
-                            if let Some((at, value)) =
-                                light_send(scope, &frames[top], index, &stack, true)
-                            {
-                                stack.truncate(at);
-                                stack.push(value);
-                                continue;
+            // ones that change the frames, so cannot run light. Not while a
+            // `TracePoint` is enabled (#127): a call, a yield or a return
+            // here takes no frame through `tracepoint_step`'s events, and the
+            // closure's arms do the same work the general way.
+            if tp_floor == 0 {
+                match insn {
+                    // The call most sends are — see `send_simple`. Anything it
+                    // does not take is the closure's, untouched.
+                    // A site whose plan has said no — a native's, for one — says
+                    // it again for as long as its entry holds what it said it
+                    // for, and a refill forgets it: such a send goes straight to
+                    // the closure's `dispatch`, without the fast path's lookups.
+                    //
+                    // A primitive with a light form is answered where it stands,
+                    // allocating if it must — the stack was rooted at the top of
+                    // the loop — since `run_calls` declines one that would. No
+                    // frame changed.
+                    //
+                    // A receiver of the class the site's cache holds behind its
+                    // entry brings that entry back, and the fast paths are tried
+                    // once more for it, out of line: see `send_promoted`.
+                    // `run_calls` has done that already for a call it declined.
+                    Insn::Send(index) => {
+                        sync_out!();
+                        let slot = frames[top].cache_base + index;
+                        let declined = std::mem::take(&mut declined);
+                        match scope.call_caches().plan(slot) {
+                            Plan::General => {}
+                            Plan::Native(_) => {
+                                if let Some((at, value)) =
+                                    light_send(scope, &frames[top], index, &stack, true)
+                                {
+                                    stack.truncate(at);
+                                    stack.push(value);
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                if !declined
+                                    && send_simple(scope, &mut stack, &mut frames, index, &mut ids)
+                                        .is_some()
+                                {
+                                    reload!();
+                                    continue;
+                                }
                             }
                         }
-                        _ => {
-                            if !declined
-                                && send_simple(scope, &mut stack, &mut frames, index, &mut ids)
-                                    .is_some()
-                            {
-                                reload!();
-                                continue;
+                        if !declined && scope.call_caches().has_behind(slot) {
+                            match send_promoted(scope, &mut stack, &mut frames, index, &mut ids) {
+                                Promoted::No => {}
+                                Promoted::Answered => continue,
+                                Promoted::Pushed => {
+                                    reload!();
+                                    continue;
+                                }
                             }
                         }
                     }
-                    if !declined && scope.call_caches().has_behind(slot) {
-                        match send_promoted(scope, &mut stack, &mut frames, index, &mut ids) {
-                            Promoted::No => {}
-                            Promoted::Answered => continue,
-                            Promoted::Pushed => {
-                                reload!();
-                                continue;
-                            }
+                    // The yield most are — see `yield_simple`.
+                    Insn::Yield(index) => {
+                        sync_out!();
+                        if !std::mem::take(&mut declined)
+                            && yield_simple(scope, &mut stack, &mut frames, index, &mut ids)
+                                .is_some()
+                        {
+                            reload!();
+                            continue;
                         }
                     }
-                }
-                // The yield most are — see `yield_simple`.
-                Insn::Yield(index) => {
-                    sync_out!();
-                    if !std::mem::take(&mut declined)
-                        && yield_simple(scope, &mut stack, &mut frames, index, &mut ids).is_some()
-                    {
+                    // A frame leaving the ordinary way, with a frame below it to
+                    // answer: the closure's own arm, less the fiber and `raise`
+                    // cases it hands back.
+                    Insn::Leave if top > 0 && !frames[top].raises_receiver => {
+                        leave_in_place(scope, &mut stack, &mut frames, true);
                         reload!();
                         continue;
                     }
-                }
-                // A frame leaving the ordinary way, with a frame below it to
-                // answer: the closure's own arm, less the fiber and `raise`
-                // cases it hands back.
-                Insn::Leave if top > 0 && !frames[top].raises_receiver => {
-                    leave_in_place(scope, &mut stack, &mut frames, true);
-                    reload!();
-                    continue;
-                }
-                // `return` from a method or lambda body that no `ensure`
-                // around it has to see: the unwind the closure would start
-                // lands on this very frame, so it is answered here the way
-                // `unwind_to_handler` would answer it.
-                Insn::Return if top > 0 && returns_in_place(&frames[top], cur_pc) => {
-                    leave_in_place(scope, &mut stack, &mut frames, false);
-                    reload!();
-                    continue;
-                }
-                // Float arithmetic on two flonums, a Float literal, and a
-                // constant read or an instance-variable write their sites'
-                // caches answer (#750): answered here, without the
-                // closure, and the stretch after one run in `more_stretch`,
-                // the light loop that runs them too. See `light_more`.
-                Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) => {
-                    let depth = stack.len();
-                    let top_value = stack.last().copied();
-                    let below = if depth > 1 {
-                        stack[depth - 2]
-                    } else {
-                        Value::NIL
-                    };
-                    let ran = match light_more(scope, &frames[top], insn, top_value, below) {
-                        More::Push(value) => {
-                            stack.push(value);
-                            true
-                        }
-                        More::Pop => {
-                            stack.pop();
-                            true
-                        }
-                        More::Replace(value) => {
-                            stack.truncate(depth - 2);
-                            stack.push(value);
-                            true
-                        }
-                        More::Decline => false,
-                    };
-                    if ran {
-                        // What it pushed is immediate or a constant's, which
-                        // the constant table roots. Float arithmetic is what
-                        // says a body's stretches should run in
-                        // `more_stretch` from now on: a constant read or an
-                        // ivar write alone is in nearly every body, and
-                        // `more_stretch` costs a loop of the other
-                        // instructions a little.
-                        let base = frames[top].cache_base;
-                        if matches!(insn, Insn::BinOp(_)) {
-                            scope.call_caches_mut().set_wants_more(base);
-                        }
-                        if scope.call_caches().wants_more(base) {
-                            more_stretch(
-                                scope,
-                                &mut stack,
-                                &frames[top],
-                                &mut cur_pc,
-                                &mut budget,
-                                limit,
-                            );
-                        } else {
-                            light_stretch(
-                                scope,
-                                &mut stack,
-                                &frames[top],
-                                &mut cur_pc,
-                                &mut budget,
-                                limit,
-                            );
-                        }
+                    // `return` from a method or lambda body that no `ensure`
+                    // around it has to see: the unwind the closure would start
+                    // lands on this very frame, so it is answered here the way
+                    // `unwind_to_handler` would answer it.
+                    Insn::Return if top > 0 && returns_in_place(&frames[top], cur_pc) => {
+                        leave_in_place(scope, &mut stack, &mut frames, false);
+                        reload!();
                         continue;
                     }
+                    // Float arithmetic on two flonums, a Float literal, and a
+                    // constant read or an instance-variable write their sites'
+                    // caches answer (#750): answered here, without the
+                    // closure, and the stretch after one run in `more_stretch`,
+                    // the light loop that runs them too. See `light_more`.
+                    Insn::BinOp(_)
+                    | Insn::PushFloat(_)
+                    | Insn::GetConst(..)
+                    | Insn::SetIvar(..) => {
+                        let depth = stack.len();
+                        let top_value = stack.last().copied();
+                        let below = if depth > 1 {
+                            stack[depth - 2]
+                        } else {
+                            Value::NIL
+                        };
+                        let ran = match light_more(scope, &frames[top], insn, top_value, below) {
+                            More::Push(value) => {
+                                stack.push(value);
+                                true
+                            }
+                            More::Pop => {
+                                stack.pop();
+                                true
+                            }
+                            More::Replace(value) => {
+                                stack.truncate(depth - 2);
+                                stack.push(value);
+                                true
+                            }
+                            More::Decline => false,
+                        };
+                        if ran {
+                            // What it pushed is immediate or a constant's, which
+                            // the constant table roots. Float arithmetic is what
+                            // says a body's stretches should run in
+                            // `more_stretch` from now on: a constant read or an
+                            // ivar write alone is in nearly every body, and
+                            // `more_stretch` costs a loop of the other
+                            // instructions a little.
+                            let base = frames[top].cache_base;
+                            if matches!(insn, Insn::BinOp(_)) {
+                                scope.call_caches_mut().set_wants_more(base);
+                            }
+                            if scope.call_caches().wants_more(base) {
+                                more_stretch(
+                                    scope,
+                                    &mut stack,
+                                    &frames[top],
+                                    &mut cur_pc,
+                                    &mut budget,
+                                    limit,
+                                );
+                            } else {
+                                light_stretch(
+                                    scope,
+                                    &mut stack,
+                                    &frames[top],
+                                    &mut cur_pc,
+                                    &mut budget,
+                                    limit,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
 
             // One instruction, run in a closure so that `?` still reads as it did
@@ -3565,6 +3693,25 @@ fn run<'h>(
                                 )? {
                                     return Ok(Step::Unwind(unwind));
                                 }
+                            }
+                            // `1 / 0` is raised in `Integer#/`, as a `:raise`
+                            // reports it (#127).
+                            Err(error @ Error::Raise { .. }) => {
+                                if scope.trace_events() & TRACE_RAISE != 0 {
+                                    let name = crate::shared::symbols::intern(op.name());
+                                    if let Some(class) = class_of(scope, left)
+                                        && let Some(found) = scope.lookup_method(class, name)
+                                    {
+                                        trace_note_raised_in(
+                                            scope,
+                                            &mut frames,
+                                            left,
+                                            found.owner,
+                                            name,
+                                        );
+                                    }
+                                }
+                                return Err(error);
                             }
                             Err(other) => return Err(other),
                         }
@@ -4793,7 +4940,7 @@ fn run<'h>(
                             .expect("an ensure to leave")
                         {
                             Parked::Value(value) => stack.push(value),
-                            Parked::Unwind(unwind) => return Ok(Step::Unwind(unwind)),
+                            Parked::Unwind(unwind) => return Ok(Step::Resume(unwind)),
                         }
                     }
                 }
@@ -4801,10 +4948,17 @@ fn run<'h>(
             })();
 
             reload!();
+            // Whether this is where an exception starts, for `:raise` (#127),
+            // rather than an unwind an `ensure` interrupted going on.
+            let mut starts = true;
             let unwind = match stepped {
                 Ok(Step::Next) => continue,
                 Ok(Step::Done(value)) => break value,
                 Ok(Step::Unwind(unwind)) => unwind,
+                Ok(Step::Resume(unwind)) => {
+                    starts = false;
+                    unwind
+                }
                 // A raise becomes an object here and nowhere else, so every site
                 // that has been emitting `Error::Raise` since #11 starts being
                 // catchable without being touched.
@@ -4819,6 +4973,7 @@ fn run<'h>(
                 // and answers why, and nothing else sees it (#145).
                 Err(other) => {
                     seen_frames = usize::MAX;
+                    starts = false;
                     refuse(scope, &mut stack, &mut frames, &mut boundaries, other)?
                 }
             };
@@ -4829,8 +4984,42 @@ fn run<'h>(
             if let Unwind::Exception(exception) = unwind {
                 attach_backtrace(scope, &frames, exception);
             }
+            // And where a `TracePoint`'s `:raise` fires (#127), before the
+            // unwind, which a hook frame on top parks until it returns.
+            let unwind = if starts
+                && matches!(unwind, Unwind::Exception(_))
+                && scope.trace_events() & TRACE_RAISE != 0
+            {
+                match trace_raise(scope, &mut stack, &mut frames, proc_class, &mut ids, unwind) {
+                    Ok(Traced::Pushed) => {
+                        tp_floor = u64::MAX;
+                        limit = limit.max(tp_floor);
+                        reload!();
+                        continue;
+                    }
+                    Ok(Traced::Resume(unwind)) => unwind,
+                    Ok(Traced::Run) => unwind,
+                    Err(Error::Raise { class, message }) => {
+                        Unwind::Exception(exception_new(scope, class, &message))
+                    }
+                    Err(other) => {
+                        seen_frames = usize::MAX;
+                        refuse(scope, &mut stack, &mut frames, &mut boundaries, other)?
+                    }
+                }
+            } else {
+                unwind
+            };
             if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
                 break value;
+            }
+            // The unwinder parks a method's `:return` for this loop to fire
+            // when a `TracePoint` waits for one, which this loop may not have
+            // seen enabled yet (#127).
+            if tp_floor == 0 && scope.trace_events() != 0 {
+                tp_floor = u64::MAX;
+                traced_last = (0, 0);
+                limit = limit.max(tp_floor);
             }
             reload!();
         })
@@ -4971,6 +5160,26 @@ fn frame_roots(frame: &Call, f: &mut impl FnMut(Value)) {
         match *parked {
             Parked::Value(value) => f(value),
             Parked::Unwind(unwind) => unwind_roots(unwind, f),
+        }
+    }
+    if let Some(rare) = &frame.rare {
+        match rare.trace_owed {
+            Some(Owed::Return(value)) => f(value),
+            Some(Owed::Raise(raise)) => {
+                f(raise.exception);
+                f(raise.from.receiver);
+            }
+            None => {}
+        }
+        if let Some(raise) = rare.trace_raise {
+            f(raise.exception);
+            f(raise.from.receiver);
+        }
+        if let Some(from) = rare.trace_from {
+            f(from.receiver);
+        }
+        if let Some(unwind) = rare.trace_unwind {
+            unwind_roots(unwind, f);
         }
     }
 }
@@ -5142,6 +5351,21 @@ fn unwind_to_handler(
 ) -> Result<Option<Value>, Error> {
     loop {
         let top = frames.len() - 1;
+        // A `:raise` the core library started fires here, at the program's
+        // frame below it, as at the C method's caller in CRuby (#127): the
+        // unwind is parked for this frame's loop to fire it.
+        if let Unwind::Exception(exception) = unwind
+            && let Some(rare) = frames[top].rare.as_deref_mut()
+            && let Some(raise) = rare.trace_raise
+            && raise.exception == exception
+        {
+            rare.trace_raise = None;
+            if scope.trace_events() & TRACE_RAISE != 0 {
+                rare.trace_owed = Some(Owed::Raise(raise));
+                rare.trace_unwind = Some(unwind);
+                return Ok(None);
+            }
+        }
         // `pc` has already moved past the instruction that unwound, and the
         // range covers that instruction rather than the next one.
         let faulting = u32::try_from(frames[top].pc.saturating_sub(1)).unwrap_or(u32::MAX);
@@ -5190,6 +5414,20 @@ fn unwind_to_handler(
         }
 
         if let Some(entry) = entry {
+            // Whatever a `TracePoint` hook parked here is overtaken (#127):
+            // the hook raised, and this frame handles that instead.
+            if let Some(rare) = frames[top].rare.as_deref_mut() {
+                rare.trace_owed = None;
+                rare.trace_unwind = None;
+                if matches!(entry.kind, CatchKind::Rescue) {
+                    rare.trace_unwound_at = None;
+                }
+            }
+            if let (CatchKind::Rescue, Unwind::Exception(exception)) = (entry.kind, unwind)
+                && frame_in_core(&frames[top])
+            {
+                trace_rescued_in_core(frames, top, exception);
+            }
             stack.truncate(frames[top].base + entry.stack_depth as usize);
             match entry.kind {
                 CatchKind::Rescue => match unwind {
@@ -5206,6 +5444,14 @@ fn unwind_to_handler(
                     _ => unreachable!("a rescue entry only accepts an exception"),
                 },
                 CatchKind::Ensure => {
+                    // Where the unwind left the body, which a `:return` after
+                    // the `ensure` reports, as CRuby's frame is still there.
+                    if frames[top].trace & FRAME_METHOD != 0 {
+                        frames[top]
+                            .rare_mut()
+                            .trace_unwound_at
+                            .get_or_insert(faulting as usize);
+                    }
                     // An `ensure` runs with `$!` set while an exception is
                     // still propagating through it — measured — and with it
                     // nil on every other path, including after a `rescue`
@@ -5223,6 +5469,31 @@ fn unwind_to_handler(
         // Nothing in this frame wanted it. The frame is done either way, and
         // its own `ensure`s have already run — they are entries in the table
         // that was just searched.
+        //
+        // A method's `:return` fires first, while its frame is still there
+        // to be asked about (#127): with what a `return` in a block written
+        // in it carries, and nil for anything else — a `break` out of the
+        // block it was given too, measured on CRuby 4.0.9. Its loop fires
+        // it, and the unwind goes on from here when the hook returns.
+        if scope.trace_events() & TRACE_RETURN != 0
+            && frames[top].trace & FRAME_METHOD != 0
+            && !frame_in_core(&frames[top])
+            && !frames[top]
+                .rare
+                .as_deref()
+                .is_some_and(|rare| rare.trace_returned)
+        {
+            let id = frames[top].id;
+            let value = match unwind {
+                Unwind::Return { frame, value } if frame == id => value,
+                _ => Value::NIL,
+            };
+            let rare = frames[top].rare_mut();
+            rare.trace_returned = true;
+            rare.trace_owed = Some(Owed::Return(value));
+            rare.trace_unwind = Some(unwind);
+            return Ok(None);
+        }
         let done = frames.pop().expect("a frame to unwind out of");
         // Nothing here wanted it, so this frame is done and gives `$!` back as
         // it found it. Whichever frame does catch it sets the cell above.
@@ -5716,6 +5987,8 @@ fn send_bound<const SPLATS: bool>(
             errinfo_on_entry,
             owner: Some(method.owner),
             defined_as: Some(plan.name),
+            // A method's body: see `trace_mark`.
+            trace: FRAME_METHOD,
             rare: None,
         },
     );
@@ -6388,6 +6661,7 @@ fn yield_simple(
             errinfo_on_entry,
             owner,
             defined_as,
+            trace: 0,
             rare: None,
         },
     );
@@ -6940,6 +7214,7 @@ fn dispatch<'h>(
                         scope_default: ScopeDefault::Public,
                     };
                     push_method_frame(scope, stack, frames, &call, &iseq, Binding::Strict, links)?;
+                    trace_mark_method(scope, frames);
                     // Said on top of the frame, so it prints before the body
                     // runs, as CRuby's does.
                     if let Some((text, relieved)) = unused {
@@ -6980,12 +7255,16 @@ fn dispatch<'h>(
                         ids,
                         ProcRole::Method,
                     )?;
+                    // A method as far as `:call` and `:return` go, as
+                    // CRuby's bmethod is.
+                    trace_mark_method(scope, frames);
                     let last = frames.len() - 1;
                     set_break_target(scope, call.block, frames[last].id);
                     Ok(None)
                 }
                 Some(Definition::Native(native)) => {
                     let name = call.name;
+                    let receiver = call.receiver;
                     let result = native_call(scope, stack, frames, call, native, proc_class, ids);
                     if result.is_err() {
                         scope.take_pending_warning();
@@ -7001,6 +7280,7 @@ fn dispatch<'h>(
                                 crate::shared::symbols::name(name).unwrap_or_default();
                             let label = qualified_method_name(scope, method.owner, &method_name);
                             attach_backtrace_from(scope, frames, exception, Some(label));
+                            trace_note_raised_in(scope, frames, receiver, method.owner, name);
                             Ok(Some(Unwind::Exception(exception)))
                         }
                         Ok(None) => {
@@ -7453,6 +7733,7 @@ fn bind_and_push(
         // else, where `super` has no method to be one step past.
         owner: call.owner,
         defined_as: call.defined_as,
+        trace: 0,
         rare: None,
     });
     Ok(())
@@ -8919,6 +9200,16 @@ fn open_class<'h>(
         home: links.home,
         breaks: 0,
         errinfo_on_entry: scope.errinfo(),
+        // A `class` or `module` body, whose `:class` event fires before its
+        // first instruction when a `TracePoint` waits for one (#127) — after
+        // the hooks below, as CRuby's `inherited` runs before the body's
+        // frame is entered. A `class << obj` body has none, measured on
+        // CRuby 4.0.9.
+        trace: if def.kind == DefKind::Singleton {
+            0
+        } else {
+            FRAME_CLASS | entry_owed(scope, TRACE_CLASS)
+        },
         rare: None,
     });
     // A new definition's hooks run before its body: each is a frame above the
@@ -12957,6 +13248,7 @@ fn native_call<'h>(
                                 Binding::Strict,
                                 links,
                             )?;
+                            trace_mark_method(scope, frames);
                             let last = frames.len() - 1;
                             frames[last].keeps_receiver = true;
                             Ok(None)
@@ -12975,6 +13267,7 @@ fn native_call<'h>(
                                 ids,
                                 ProcRole::Method,
                             )?;
+                            trace_mark_method(scope, frames);
                             let last = frames.len() - 1;
                             set_break_target(scope, call.block, frames[last].id);
                             frames[last].keeps_receiver = true;
@@ -15149,6 +15442,7 @@ fn native_call<'h>(
         }
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
+        Native::Trace(op) => trace_native(scope, stack, frames, &call, op),
         Native::LoadFile => load_file(scope, stack, frames, &call, ids),
         Native::LoadExtension => ext::load(scope, stack, frames, proc_class, ids, &call),
         Native::BytecodeCache => {
@@ -17797,6 +18091,34 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             },
         ),
         (Builtin::Kernel, &["__hash_combine__"], Native::HashCombine),
+        (
+            Builtin::Kernel,
+            &["__trace_events__"],
+            Native::Trace(TraceOp::Events),
+        ),
+        (
+            Builtin::Kernel,
+            &["__trace_binding__"],
+            Native::Trace(TraceOp::Binding),
+        ),
+        (
+            Builtin::Kernel,
+            &["__trace_target__"],
+            Native::Trace(TraceOp::Target),
+        ),
+        (
+            Builtin::Kernel,
+            &["__trace_parameters__"],
+            Native::Trace(TraceOp::Parameters),
+        ),
+        (
+            Builtin::Kernel,
+            &["__needs_trace_events__"],
+            Native::Refuse {
+                what: "a `TracePoint` event but `:class`, `:call`, `:return`, `:line` and `:raise`",
+                needs: "the rest of `TracePoint`'s events, after #127",
+            },
+        ),
         (
             Builtin::Kernel,
             &["__fiber_new__"],
@@ -23209,6 +23531,558 @@ fn heap_repr(scope: &mut HandleScope<'_>, object: Value) -> Option<Builtin> {
     scope
         .class_of(handle)
         .and_then(|id| scope.classes().repr(id))
+}
+
+// ---------------------------------------------------------------------------
+// TracePoint (#127)
+// ---------------------------------------------------------------------------
+//
+// `core/trace_point.rb` keeps this Ractor's enabled `TracePoint`s and tells
+// the heap which events any of them waits for (`Kernel#__trace_events__`).
+// While that is nonzero the loop leaves every path that could carry it past
+// an event — the light stretches, `run_calls`, the inline sends, yields and
+// returns before its closure, a superinstruction's run — and goes through
+// `tracepoint_step` before every instruction. That is the interpreter's
+// deoptimisation: bytecode is shared between Ractors and never rewritten, as
+// CRuby rewrites its instructions to their `trace_` forms, so what changes is
+// how the loop runs it, and it changes back when the last one is disabled.
+//
+// An event is a call to `TracePoint.__fire__` pushed on top of the frame it
+// happened in, as a finalizer's or a signal handler's is, so the hook runs in
+// this loop and sees that frame's binding. The frame comes back to the same
+// instruction when the hooks are done, and `Rare::trace_done` says which
+// events it has already fired there. An event the unwinder owes — a method's
+// `:return` on its way out, a `:raise` the core library started — parks the
+// unwind on the frame, and the unwind goes on once the hook returns.
+
+/// The bit each event the interpreter fires is in
+/// [`HandleScope::trace_events`]; `core/trace_point.rb`'s `BITS` agrees.
+pub(crate) const TRACE_LINE: u8 = 1;
+pub(crate) const TRACE_CALL: u8 = 2;
+pub(crate) const TRACE_RETURN: u8 = 4;
+pub(crate) const TRACE_CLASS: u8 = 8;
+pub(crate) const TRACE_RAISE: u8 = 16;
+
+/// [`Call::trace`]: a method's body.
+const FRAME_METHOD: u8 = 1;
+/// [`Call::trace`]: a `class` or `module` body.
+const FRAME_CLASS: u8 = 2;
+/// [`Call::trace`]: the frame's `:call` or `:class` has not fired yet.
+const FRAME_ENTRY: u8 = 4;
+
+/// What the loop pins its limit at for `TracePoint`s: the maximum while one
+/// is enabled, which sends every instruction through [`tracepoint_step`].
+fn trace_floor_for(scope: &HandleScope<'_>) -> u64 {
+    if scope.trace_events() == 0 {
+        0
+    } else {
+        u64::MAX
+    }
+}
+
+/// [`FRAME_ENTRY`] for a frame pushed now, when a `TracePoint` waits for its
+/// `event`: a frame entered before one was enabled has no `:call` to fire.
+fn entry_owed(scope: &HandleScope<'_>, event: u8) -> u8 {
+    if scope.trace_events() & event == 0 {
+        0
+    } else {
+        FRAME_ENTRY
+    }
+}
+
+/// Mark the frame just pushed as a method's body: one whose `:return` fires
+/// however it leaves, entered before a `TracePoint` was enabled or not, and
+/// whose `:call` fires before its first instruction when one is enabled now.
+fn trace_mark_method(scope: &HandleScope<'_>, frames: &mut [Call]) {
+    if let Some(frame) = frames.last_mut() {
+        frame.trace = FRAME_METHOD | entry_owed(scope, TRACE_CALL);
+    }
+}
+
+/// What a `:raise` reports it was raised in when that is not the frame whose
+/// line and binding it reports: a primitive, or a method the core library
+/// writes in Ruby, which CRuby's is a C method — its receiver, and the class
+/// and name it was found by. Measured on CRuby 4.0.9: `[1].fetch(9)` is
+/// raised in `Array#fetch`, with `[1]` its `self`, at the program's line.
+#[derive(Clone, Copy)]
+struct TraceFrom {
+    receiver: Value,
+    owner: Option<ClassId>,
+    name: Option<SymbolId>,
+}
+
+/// A `:raise` the core library started, owed to the program's frame below it
+/// once the unwind reaches that frame: an exception the core library raises
+/// and rescues itself is one CRuby's C never raises.
+#[derive(Clone, Copy)]
+struct CoreRaise {
+    exception: Value,
+    from: TraceFrom,
+}
+
+/// An event the unwinder parked on a frame for its loop to fire.
+#[derive(Clone, Copy)]
+enum Owed {
+    /// The frame's `:return`, with the value it returns.
+    Return(Value),
+    /// A `:raise` started in the core library: see [`CoreRaise`].
+    Raise(CoreRaise),
+}
+
+/// What [`tracepoint_step`] leaves the loop to do.
+enum Traced {
+    /// Run the instruction.
+    Run,
+    /// A hook's frame is on top now: run it.
+    Pushed,
+    /// Go on with this unwind.
+    Resume(Unwind),
+}
+
+/// One event, as [`trace_push`] hands it to `TracePoint.__fire__`.
+struct TraceEvent {
+    event: u8,
+    /// The frame it is reported in.
+    at: usize,
+    /// The instruction whose line it reports.
+    line_pc: usize,
+    /// The return value or the exception, for `:return` and `:raise`.
+    value: Value,
+    from: Option<TraceFrom>,
+}
+
+/// Before the top frame's instruction at its `pc` runs, while a
+/// `TracePoint` is enabled: fire what is owed there, in CRuby's order — an
+/// event the unwinder parked, the frame's `:call` or `:class`, a `:line`,
+/// then a method's `:return` before its `Leave` — one at a time, each a hook
+/// frame the loop runs before coming back here. `last` is the frame and `pc`
+/// of the instruction stepped before this one, which a loop's `:line` reads.
+/// Nothing fires in a frame of the core library, which CRuby's C is.
+#[cold]
+#[inline(never)]
+fn tracepoint_step<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    last: &mut (u64, usize),
+) -> Result<Traced, Error> {
+    let events = scope.trace_events();
+    let top = frames.len() - 1;
+    let pc = frames[top].pc;
+    let previous = std::mem::replace(last, (frames[top].id, pc));
+    if let Some(rare) = frames[top].rare.as_deref_mut()
+        && (rare.trace_owed.is_some() || rare.trace_unwind.is_some())
+    {
+        let owed = rare.trace_owed.take();
+        let event = match owed {
+            Some(Owed::Return(value)) if events & TRACE_RETURN != 0 => Some(TraceEvent {
+                event: TRACE_RETURN,
+                at: top,
+                line_pc: rare.trace_unwound_at.take().unwrap_or(pc.saturating_sub(1)),
+                value,
+                from: None,
+            }),
+            Some(Owed::Raise(raise)) if events & TRACE_RAISE != 0 => Some(TraceEvent {
+                event: TRACE_RAISE,
+                at: top,
+                line_pc: pc.saturating_sub(1),
+                value: raise.exception,
+                from: Some(raise.from),
+            }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            match trace_push(scope, stack, frames, proc_class, ids, event)? {
+                Traced::Pushed => return Ok(Traced::Pushed),
+                Traced::Resume(unwind) => {
+                    if let Some(rare) = frames[top].rare.as_deref_mut() {
+                        rare.trace_unwind = None;
+                    }
+                    return Ok(Traced::Resume(unwind));
+                }
+                Traced::Run => {}
+            }
+        }
+        // Nothing waits for it any more: the unwind goes on.
+        if let Some(unwind) = frames[top]
+            .rare
+            .as_deref_mut()
+            .and_then(|rare| rare.trace_unwind.take())
+        {
+            return Ok(Traced::Resume(unwind));
+        }
+    }
+    let frame = &mut frames[top];
+    if frame_in_core(frame) {
+        frame.trace &= !FRAME_ENTRY;
+        return Ok(Traced::Run);
+    }
+    let mut done = match frame.rare.as_deref().and_then(|rare| rare.trace_done) {
+        Some((at, done)) if at == pc => done,
+        _ => 0,
+    };
+    let mut fire = None;
+    if frame.trace & FRAME_ENTRY != 0 {
+        frame.trace &= !FRAME_ENTRY;
+        let event = if frame.trace & FRAME_CLASS != 0 {
+            TRACE_CLASS
+        } else {
+            TRACE_CALL
+        };
+        if events & event != 0 {
+            fire = Some((event, Value::NIL));
+        }
+    }
+    if fire.is_none()
+        && events & TRACE_LINE != 0
+        && done & TRACE_LINE == 0
+        && let Some(loop_end) = frame.iseq.line_event_at(pc)
+        && !(loop_end != 0
+            && previous.0 == frame.id
+            && (pc..loop_end as usize).contains(&previous.1))
+    {
+        done |= TRACE_LINE;
+        fire = Some((TRACE_LINE, Value::NIL));
+    }
+    if fire.is_none()
+        && events & TRACE_RETURN != 0
+        && done & TRACE_RETURN == 0
+        && frame.trace & FRAME_METHOD != 0
+        && matches!(frame.iseq.insns.get(pc), Some(Insn::Leave))
+        && !frame
+            .rare
+            .as_deref()
+            .is_some_and(|rare| rare.trace_returned)
+    {
+        done |= TRACE_RETURN;
+        // What `Leave` answers: the top of the frame's operands.
+        let value = if stack.len() > frame.base {
+            stack[stack.len() - 1]
+        } else {
+            Value::NIL
+        };
+        frame.rare_mut().trace_returned = true;
+        fire = Some((TRACE_RETURN, value));
+    }
+    let Some((event, value)) = fire else {
+        // The instruction runs: what the last one left for a `:raise` that
+        // did not come is no longer about anything.
+        if let Some(rare) = frame.rare.as_deref_mut() {
+            rare.trace_done = None;
+            rare.trace_from = None;
+        }
+        return Ok(Traced::Run);
+    };
+    if done != 0 {
+        frame.rare_mut().trace_done = Some((pc, done));
+    }
+    trace_push(
+        scope,
+        stack,
+        frames,
+        proc_class,
+        ids,
+        TraceEvent {
+            event,
+            at: top,
+            line_pc: pc,
+            value,
+            from: None,
+        },
+    )
+}
+
+/// Where an exception starts, while a `TracePoint` waits for `:raise`: fire
+/// it now, before the unwind, when the program's own frame raised it — the
+/// unwind parked on that frame until the hook returns — and when the core
+/// library did, leave it owed to the program's frame below, which the
+/// unwinder fires it at if it gets there (see [`CoreRaise`]).
+fn trace_raise<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    unwind: Unwind,
+) -> Result<Traced, Error> {
+    let Unwind::Exception(exception) = unwind else {
+        return Ok(Traced::Resume(unwind));
+    };
+    let Some(top) = frames.len().checked_sub(1) else {
+        return Ok(Traced::Resume(unwind));
+    };
+    let from = frames[top]
+        .rare
+        .as_deref_mut()
+        .and_then(|rare| rare.trace_from.take());
+    let Some(at) = (0..=top).rev().find(|&at| !frame_in_core(&frames[at])) else {
+        return Ok(Traced::Resume(unwind));
+    };
+    if at < top {
+        let entry = &frames[at + 1];
+        let from = TraceFrom {
+            receiver: entry.receiver,
+            owner: entry.owner,
+            name: entry.defined_as,
+        };
+        frames[at].rare_mut().trace_raise = Some(CoreRaise { exception, from });
+        return Ok(Traced::Resume(unwind));
+    }
+    frames[top].rare_mut().trace_unwind = Some(unwind);
+    let line_pc = frames[top].pc.saturating_sub(1);
+    let event = TraceEvent {
+        event: TRACE_RAISE,
+        at: top,
+        line_pc,
+        value: exception,
+        from,
+    };
+    let pushed = trace_push(scope, stack, frames, proc_class, ids, event)?;
+    if matches!(pushed, Traced::Pushed) {
+        return Ok(pushed);
+    }
+    if let Some(rare) = frames[top].rare.as_deref_mut() {
+        rare.trace_unwind = None;
+    }
+    Ok(match pushed {
+        Traced::Resume(other) => Traced::Resume(other),
+        _ => Traced::Resume(unwind),
+    })
+}
+
+/// What a primitive that raised was, for a `:raise` that fires at its
+/// caller: see [`TraceFrom`]. Kept on the calling frame until the raise
+/// takes it, and only while a `TracePoint` waits for `:raise`.
+fn trace_note_raised_in(
+    scope: &HandleScope<'_>,
+    frames: &mut [Call],
+    receiver: Value,
+    owner: ClassId,
+    name: SymbolId,
+) {
+    if scope.trace_events() & TRACE_RAISE == 0 {
+        return;
+    }
+    if let Some(frame) = frames.last_mut() {
+        frame.rare_mut().trace_from = Some(TraceFrom {
+            receiver,
+            owner: Some(owner),
+            name: Some(name),
+        });
+    }
+}
+
+/// An exception a `rescue` in the core library caught: no `:raise` is owed
+/// for it to the program's frame below, since CRuby's C never raised it.
+fn trace_rescued_in_core(frames: &mut [Call], at: usize, exception: Value) {
+    if let Some(below) = (0..at).rev().find(|&below| !frame_in_core(&frames[below]))
+        && let Some(rare) = frames[below].rare.as_deref_mut()
+        && rare
+            .trace_raise
+            .is_some_and(|raise| raise.exception == exception)
+    {
+        rare.trace_raise = None;
+    }
+}
+
+/// Push the call to `TracePoint.__fire__` for `event`: what a hook can ask
+/// about it, read off the frame it happened in. `$!` is nil inside the
+/// hook, as CRuby clears it, and the frame's pop gives it back.
+fn trace_push<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    event: TraceEvent,
+) -> Result<Traced, Error> {
+    let name = crate::shared::symbols::intern("TracePoint");
+    let Some(tracepoint) = scope.const_get_here(Builtin::Object.id(), name) else {
+        return Ok(Traced::Run);
+    };
+    let frame = &frames[event.at];
+    // A method's `:call` is on its `def` line and a class's `:class` on its
+    // `class` line, whatever instruction comes first.
+    let line = match event.event {
+        TRACE_CALL | TRACE_CLASS if frame.iseq.first_line > 0 => frame.iseq.first_line,
+        _ => frame.iseq.line_at(event.line_pc).unwrap_or(0),
+    };
+    let path = frame.iseq.path.clone();
+    let iseq = std::ptr::from_ref::<Iseq>(&frame.iseq) as i64;
+    let id = i64::try_from(frame.id).unwrap_or(0);
+    let (receiver, owner, method) = match event.from {
+        Some(from) => (from.receiver, from.owner, from.name),
+        None if event.event == TRACE_CLASS => (frame.receiver, None, None),
+        None => (frame.receiver, frame.owner, frame.defined_as),
+    };
+    // `method_id` is the name the body was defined under, `callee_id` the
+    // one it was called by: an alias's are its original and itself.
+    let (method_id, callee_id, defined_class) = match (owner, method) {
+        (Some(owner), Some(name)) => {
+            let origin = scope.classes().super_origin(owner, name);
+            (
+                Value::symbol(origin.name),
+                Value::symbol(name),
+                scope.class_object(owner),
+            )
+        }
+        _ => (Value::NIL, Value::NIL, Value::NIL),
+    };
+    let path = match path {
+        Some(path) => {
+            let string = string_new(scope, &path);
+            scope.root(string);
+            string
+        }
+        None => Value::NIL,
+    };
+    let kind = match event.event {
+        TRACE_LINE => "line",
+        TRACE_CALL => "call",
+        TRACE_RETURN => "return",
+        TRACE_CLASS => "class",
+        _ => "raise",
+    };
+    let args = vec![
+        Value::symbol(crate::shared::symbols::intern(kind)),
+        Value::fixnum(id).unwrap_or(Value::NIL),
+        receiver,
+        path,
+        Value::fixnum(i64::from(line)).unwrap_or(Value::NIL),
+        method_id,
+        callee_id,
+        defined_class,
+        event.value,
+        Value::fixnum(iseq).unwrap_or(Value::NIL),
+    ];
+    let depth = frames.len();
+    let fire = crate::shared::symbols::intern("__fire__");
+    if let Some(unwind) = call_discarded(
+        scope, stack, frames, proc_class, ids, tracepoint, fire, args,
+    )? {
+        return Ok(Traced::Resume(unwind));
+    }
+    if frames.len() == depth {
+        return Ok(Traced::Run);
+    }
+    scope.set_errinfo(Value::NIL);
+    Ok(Traced::Pushed)
+}
+
+/// `Kernel#__trace_target__(body, events, line)` (#127): what a
+/// `TracePoint` enabled with `target:` hooks — `body` a method's definition
+/// id or a `Proc` — as `[ids, count]`: the identity of its `Iseq` and of
+/// every body written inside it, which `TracePoint.__fire__` compares an
+/// event's against, and how many places in them an event of `events` can
+/// fire, as CRuby's `rb_iseq_add_local_tracepoint_recursively` counts them,
+/// so that none is CRuby's "can not enable any hooks". `line`, when not
+/// nil, keeps the `:line` events on that line alone. Nil for what CRuby's
+/// `RubyVM::InstructionSequence.of` has no `Iseq` for: a C method, which a
+/// core-library method is, and anything but a `Method` body or a `Proc`.
+fn trace_target(
+    scope: &mut HandleScope<'_>,
+    body: Value,
+    events: u8,
+    line: Option<i64>,
+) -> Option<(Vec<i64>, i64)> {
+    // The body, and whether it runs as a method: a `def`'s, or a
+    // `define_method` body, whose `Proc` is a method's to `:call`.
+    let (root, method, bmethod) = if body.as_fixnum().is_some() {
+        match scope.definitions().get(body).cloned()? {
+            Definition::Iseq(iseq) if !is_internal(&iseq) => (iseq, true, false),
+            Definition::Proc(block, owner) => {
+                let block = scope.local_proc(block, owner)?;
+                (proc_parts(scope, block)?.0, false, true)
+            }
+            _ => return None,
+        }
+    } else {
+        (proc_parts(scope, body)?.0, false, false)
+    };
+    let mut ids = Vec::new();
+    let mut count = i64::from(bmethod && events & (TRACE_CALL | TRACE_RETURN) != 0);
+    // Each body with what it is: 0 a block, 1 a method, 2 a class body.
+    let mut todo = vec![(root, u8::from(method))];
+    while let Some((iseq, kind)) = todo.pop() {
+        ids.push(Arc::as_ptr(&iseq) as i64);
+        if events & TRACE_LINE != 0 {
+            let on_line = |&&(pc, _): &&(u32, u32)| {
+                line.is_none_or(|line| iseq.line_at(pc as usize).map(i64::from) == Some(line))
+            };
+            count += iseq.line_events.iter().filter(on_line).count() as i64;
+        }
+        if (kind == 1 && events & (TRACE_CALL | TRACE_RETURN) != 0)
+            || (kind == 2 && events & TRACE_CLASS != 0)
+        {
+            count += 1;
+        }
+        for (index, child) in iseq.children.iter().enumerate() {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            let kind = if iseq.definitions.iter().any(|&(_, at)| at == index) {
+                1
+            } else if iseq.class_defs.iter().any(|def| def.body == index) {
+                2
+            } else {
+                0
+            };
+            todo.push((Arc::clone(child), kind));
+        }
+    }
+    Some((ids, count))
+}
+
+/// The `TracePoint` primitives (#127): see [`TraceOp`].
+fn trace_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut [Call],
+    call: &Pending,
+    op: TraceOp,
+) -> Result<Option<Unwind>, Error> {
+    let arg = |at: usize| call.args.get(at).copied().unwrap_or(Value::NIL);
+    let answer = match op {
+        TraceOp::Events => {
+            let events = arg(0).as_fixnum().unwrap_or(0);
+            scope.set_trace_events(u8::try_from(events & 0xff).unwrap_or(0));
+            Value::NIL
+        }
+        TraceOp::Binding => {
+            let id = arg(0).as_fixnum().and_then(|id| u64::try_from(id).ok());
+            match frames.iter().rposition(|frame| Some(frame.id) == id) {
+                Some(index) => capture_binding(scope, stack, frames, Some(index))?,
+                None => Value::NIL,
+            }
+        }
+        TraceOp::Parameters => {
+            let id = arg(0).as_fixnum().and_then(|id| u64::try_from(id).ok());
+            match frames.iter().rposition(|frame| Some(frame.id) == id) {
+                Some(index) => {
+                    let iseq = frames[index].iseq.to_arc();
+                    parameters_value(scope, &iseq)
+                }
+                None => Value::NIL,
+            }
+        }
+        TraceOp::Target => {
+            let events = u8::try_from(arg(1).as_fixnum().unwrap_or(0) & 0xff).unwrap_or(0);
+            let line = arg(2).as_fixnum();
+            match trace_target(scope, arg(0), events, line) {
+                None => Value::NIL,
+                Some((ids, count)) => {
+                    let ids: Vec<Value> = ids.into_iter().filter_map(Value::fixnum).collect();
+                    let list = new_array(scope, &ids);
+                    let list = scope.root(list);
+                    let count = Value::fixnum(count).unwrap_or(Value::NIL);
+                    let pair = [scope.get(list), count];
+                    new_array(scope, &pair)
+                }
+            }
+        }
+    };
+    stack.push(answer);
+    Ok(None)
 }
 
 /// One instruction's worth of allocation tracing (#690), run before each

@@ -137,6 +137,10 @@ const SOURCES: &[(&str, &str)] = &[
         "core/pathname.rb",
         include_str!("../../../core/pathname.rb"),
     ),
+    (
+        "core/trace_point.rb",
+        include_str!("../../../core/trace_point.rb"),
+    ),
     ("core/ractor.rb", include_str!("../../../core/ractor.rb")),
     // Last: it re-points names the files above defined twice.
     ("core/aliases.rb", include_str!("../../../core/aliases.rb")),

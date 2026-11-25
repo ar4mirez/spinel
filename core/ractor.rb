@@ -369,10 +369,10 @@ end
 # What a copy refuses, and what is never shareable, frozen or not: `Proc`,
 # but for one made shareable, and CRuby's `T_DATA` that may not be shared
 # frozen, as `make_shareable` refuses them, measured on 4.0.9. Those of them
-# the core library defines; `TracePoint` and `Enumerator::Generator` join
-# when it does.
+# the core library defines; `Enumerator::Generator` joins when it does.
 __ractor_register__(Ractor::MovedObject, [
   [Proc, "TypeError", "allocator undefined for Proc"],
+  [TracePoint, "TypeError", "allocator undefined for TracePoint"],
   [Method, "TypeError", "allocator undefined for Method"],
   [UnboundMethod, "TypeError", "allocator undefined for UnboundMethod"],
   [Binding, "TypeError", "allocator undefined for Binding"],
@@ -383,4 +383,5 @@ __ractor_register__(Ractor::MovedObject, [
   Proc, Thread, Thread::Mutex, Thread::Queue, Thread::SizedQueue, Thread::ConditionVariable,
   Thread::Backtrace::Location, Enumerator, Enumerator::Yielder, Fiber, Binding, Random,
   ObjectSpace::WeakMap, ObjectSpace::WeakKeyMap, Encoding::Converter, Dir, File::Stat, ARGF.class,
+  TracePoint,
 ])

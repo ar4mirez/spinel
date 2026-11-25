@@ -87,7 +87,14 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fourteen tags across sixty-five files. Keeping the state of
+A hundred and twelve tags across sixty-four files. `TracePoint` (#127)
+removed two, and their file: `core/kernel/set_trace_func`'s "is a private
+method" and "`Kernel.set_trace_func` is a public method", which pass now
+that `set_trace_func` exists, a refusal for a proc since the events it
+asks for include `c-call`. `trace_var` and `untrace_var`'s four still name
+#127, though they hook a global variable's assignments rather than
+anything `TracePoint` fires. Before it, a hundred and fourteen across
+sixty-five. Keeping the state of
 `IO`, `File` and the socket classes in hidden instance variables, as CRuby
 keeps it in the object's struct, removed one, and its file:
 `library/yaml/dump`'s "dumps a File without any state", which psych (#108)

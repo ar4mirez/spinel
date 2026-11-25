@@ -961,6 +961,19 @@ pub struct Iseq {
     /// `(pc, line)`, one entry wherever the line changes, in pc order. The
     /// line of an instruction is the last entry at or before it.
     pub lines: Vec<(u32, i32)>,
+    /// Where a `TracePoint`'s `:line` event fires (#127): `(pc, loop_end)`,
+    /// in pc order, one per pc. CRuby fires one before the first instruction
+    /// of a statement that starts a line no statement of the body has started
+    /// yet, in the order the compiler meets them — Prism's newline flag and
+    /// `prism_compile.c`'s `last_line`. The line it reports is the
+    /// instruction's, from [`Self::lines`].
+    ///
+    /// `loop_end` is zero, except for a `while` or `until`, whose test is its
+    /// first instruction and runs again on every turn of the loop, where
+    /// CRuby's runs once, before a jump to its test. Its event fires only when
+    /// the instruction the frame ran last is not in `pc..loop_end`: on the way
+    /// in, not from the loop's own jump back or a `next`.
+    pub line_events: Vec<(u32, u32)>,
     /// How many blocks deep this body is inside its method or script: 0 for
     /// those, 1 for a block written directly in one. A backtrace says
     /// "block (2 levels) in ..." from it.
@@ -1032,6 +1045,18 @@ impl Iseq {
         let pc = u32::try_from(pc).unwrap_or(u32::MAX);
         let index = self.lines.partition_point(|&(start, _)| start <= pc);
         index.checked_sub(1).map(|index| self.lines[index].1)
+    }
+
+    /// The `:line` event at `pc`, if one fires there: its `loop_end`, as
+    /// [`Self::line_events`] keeps it.
+    #[must_use]
+    pub fn line_event_at(&self, pc: usize) -> Option<u32> {
+        let pc = u32::try_from(pc).ok()?;
+        let index = self
+            .line_events
+            .binary_search_by_key(&pc, |&(at, _)| at)
+            .ok()?;
+        Some(self.line_events[index].1)
     }
 }
 
