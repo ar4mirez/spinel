@@ -26,7 +26,7 @@ mise use -g github:ar4mirez/spinel@0.1.0    # a pinned version
 spinel --version                            # spinel 0.1.0 (ruby 4.0.0) [x86_64-linux]
 ```
 
-mise does not install a release younger than its `minimum_release_age` setting (24 hours by default), so for the first day after a release the first line gets the release before it, or, while there is none, fails with `no versions found ... matching minimum_release_age`. Name the version instead, as in the second line. A project pins its own copy in its `mise.toml` with `mise use github:ar4mirez/spinel@0.1.0` (no `-g`).
+If mise's `minimum_release_age` setting is set (for example to `24h`), mise does not install a release younger than that, so for that long after a release the first line gets the release before it, or, while there is none, fails with `no versions found ... matching minimum_release_age`. Name the version instead, as in the second line. A project pins its own copy in its `mise.toml` with `mise use github:ar4mirez/spinel@0.1.0` (no `-g`).
 
 ### Download a binary
 
@@ -114,7 +114,7 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
   4. Install with `SPINEL_SUBSTITUTES=puma,nio4r spinel install`. `.spinel/substitutions.json` lists what was substituted, and the lockfile still names upstream's `puma` and `nio4r`. The gem source is needed whenever `spinel install` runs, not when the app does.
   5. Start Puma with `spinel run .spinel/gem_home/bin/puma`.
 
-  [spinel-demo](https://github.com/ar4mirez/spinel-demo) does all of this in `bin/setup-puma`, `gem-source/` and `bin/smoke`. Until [#894](https://github.com/ar4mirez/spinel/issues/894) is fixed, `spinel install --frozen` rejects a lockfile whose gems come from a `source` block.
+  Until [#894](https://github.com/ar4mirez/spinel/issues/894) is fixed, `spinel install --frozen` rejects a lockfile whose gems come from a `source` block.
 - **Rails** does not boot yet. `spinel install` can install a `rails new` lockfile, but loading Rails waits on the `zeitwerk` and `activesupport` test suites passing ([#130](https://github.com/ar4mirez/spinel/issues/130)) and on a first boot ([#131](https://github.com/ar4mirez/spinel/issues/131)).
 
 ## Building from source
