@@ -262,11 +262,19 @@ fn a_shebang_script_gets_the_flags_after_it() {
         ("--help", "[\"--help\"]\n"),
         ("-h", "[\"-h\"]\n"),
     ] {
-        let out = Command::new(&script)
-            .arg(arg)
-            .env("PATH", &path)
-            .output()
-            .expect("the script runs");
+        // Another test thread forking while `show.rb` was open for writing
+        // can hold that fd until its `exec`, and `execve` then fails with
+        // `ETXTBSY`: wait for that child to let go, then try again.
+        let mut tries = 0;
+        let out = loop {
+            match Command::new(&script).arg(arg).env("PATH", &path).output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.expect("the script runs"),
+            }
+        };
         assert!(out.status.success(), "{arg}: stderr: {}", stderr(&out));
         assert_eq!(stdout(&out), expected, "{arg}");
     }
