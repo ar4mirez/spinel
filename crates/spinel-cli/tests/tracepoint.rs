@@ -20,7 +20,8 @@
 //!   `:return` after an `ensure` on the `return`'s line, and none for an
 //!   exception the core library raises and rescues itself.
 //! - `hooks`: hooks that disable themselves while an unwind is parked for
-//!   them, a hook that raises, two `TracePoint`s' order, `$!` inside a hook,
+//!   them, a hook that raises, one whose `:line` raises before a `begin`
+//!   body's first line runs, two `TracePoint`s' order, `$!` inside a hook,
 //!   the names, classes and bindings an event reports, one thread's events,
 //!   and `enable(target:, target_line:)`.
 

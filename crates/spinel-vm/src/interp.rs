@@ -445,8 +445,9 @@ struct Call {
     /// What a `TracePoint` sees of this frame (#127): [`FRAME_METHOD`] for
     /// a method's body, which has `:call` and `:return` events,
     /// [`FRAME_CLASS`] for a `class` or `module` body, which has `:class`,
-    /// and [`FRAME_ENTRY`] while the `:call` or `:class` it was pushed with,
-    /// under an enabled `TracePoint`, has not fired. One byte, in what the
+    /// [`FRAME_ENTRY`] while the `:call` or `:class` it was pushed with,
+    /// under an enabled `TracePoint`, has not fired, and [`FRAME_BEFORE`]
+    /// for a hook's frame pushed before its caller's instruction ran. One byte, in what the
     /// frame's other bytes leave of its 128.
     trace: u8,
     /// What few frames hold: see [`Rare`]. `None` until one does.
@@ -5349,6 +5350,7 @@ fn unwind_to_handler(
     frames: &mut Vec<Call>,
     mut unwind: Unwind,
 ) -> Result<Option<Value>, Error> {
+    let mut before = false;
     loop {
         let top = frames.len() - 1;
         // A `:raise` the core library started fires here, at the program's
@@ -5367,8 +5369,14 @@ fn unwind_to_handler(
             }
         }
         // `pc` has already moved past the instruction that unwound, and the
-        // range covers that instruction rather than the next one.
-        let faulting = u32::try_from(frames[top].pc.saturating_sub(1)).unwrap_or(u32::MAX);
+        // range covers that instruction rather than the next one, unless the
+        // frame just unwound out of was a hook pushed before it ran.
+        let at = if std::mem::take(&mut before) {
+            frames[top].pc
+        } else {
+            frames[top].pc.saturating_sub(1)
+        };
+        let faulting = u32::try_from(at).unwrap_or(u32::MAX);
         let entry = frames[top].iseq.catch_table.iter().copied().find(|entry| {
             entry.covers(faulting)
                 && match entry.kind {
@@ -5495,6 +5503,7 @@ fn unwind_to_handler(
             return Ok(None);
         }
         let done = frames.pop().expect("a frame to unwind out of");
+        before = done.trace & FRAME_BEFORE != 0;
         // Nothing here wanted it, so this frame is done and gives `$!` back as
         // it found it. Whichever frame does catch it sets the cell above.
         scope.set_errinfo(done.errinfo_on_entry);
@@ -8301,12 +8310,12 @@ struct BacktraceLine {
 /// called it. `[2].map { raise }` is "in 'block in <main>'", "in 'Array#map'",
 /// "in '<main>'" — not the `each` and the block `core/array.rb` runs `map` on.
 fn backtrace_of(scope: &mut HandleScope<'_>, frames: &[Call]) -> Vec<BacktraceLine> {
-    let raw: Vec<(bool, Shown, BacktraceLine)> = frames
-        .iter()
+    let raw: Vec<(bool, Shown, BacktraceLine)> = (0..frames.len())
         .rev()
-        .map(|frame| {
+        .map(|at| {
+            let frame = &frames[at];
             let path = frame.iseq.path.clone().unwrap_or_else(|| Arc::from(""));
-            let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
+            let line = frame.iseq.line_at(frame_insn(frames, at)).unwrap_or(0);
             let internal = path.starts_with("<internal:");
             let label = match frame.shown() {
                 Shown::As(owner, method) => native_label(owner, method),
@@ -23569,6 +23578,24 @@ const FRAME_METHOD: u8 = 1;
 const FRAME_CLASS: u8 = 2;
 /// [`Call::trace`]: the frame's `:call` or `:class` has not fired yet.
 const FRAME_ENTRY: u8 = 4;
+/// [`Call::trace`]: a hook's frame, pushed for a `:line`, `:call` or
+/// `:class` before the instruction at its caller's `pc` ran, so the caller
+/// is at that `pc` rather than past it.
+const FRAME_BEFORE: u8 = 8;
+
+/// The instruction the frame at `at` is at: the one before its `pc`, which
+/// has moved past it, unless the frame above is a hook pushed before it ran.
+fn frame_insn(frames: &[Call], at: usize) -> usize {
+    let pc = frames[at].pc;
+    if frames
+        .get(at + 1)
+        .is_some_and(|above| above.trace & FRAME_BEFORE != 0)
+    {
+        pc
+    } else {
+        pc.saturating_sub(1)
+    }
+}
 
 /// What the loop pins its limit at for `TracePoint`s: the maximum while one
 /// is enabled, which sends every instruction through [`tracepoint_step`].
@@ -23778,7 +23805,7 @@ fn tracepoint_step<'h>(
     if done != 0 {
         frame.rare_mut().trace_done = Some((pc, done));
     }
-    trace_push(
+    let pushed = trace_push(
         scope,
         stack,
         frames,
@@ -23791,7 +23818,14 @@ fn tracepoint_step<'h>(
             value,
             from: None,
         },
-    )
+    )?;
+    if matches!(pushed, Traced::Pushed)
+        && event != TRACE_RETURN
+        && let Some(hook) = frames.get_mut(top + 1)
+    {
+        hook.trace |= FRAME_BEFORE;
+    }
+    Ok(pushed)
 }
 
 /// Where an exception starts, while a `TracePoint` waits for `:raise`: fire
@@ -23967,6 +24001,7 @@ fn trace_push<'h>(
     if frames.len() == depth {
         return Ok(Traced::Run);
     }
+    frames[depth].set_shown(Shown::Hidden);
     scope.set_errinfo(Value::NIL);
     Ok(Traced::Pushed)
 }

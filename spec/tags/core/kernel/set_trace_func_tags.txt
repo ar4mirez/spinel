@@ -1,0 +1,2 @@
+fails(#127: `Kernel#set_trace_func` is tracing, which comes with `TracePoint`):Kernel#set_trace_func is a private method
+fails(#127: `Kernel#set_trace_func` is tracing, which comes with `TracePoint`):Kernel.set_trace_func is a public method

@@ -70,6 +70,18 @@ rescue ArgumentError => e
   note(:hook_raised, e.message, raising.enabled?)
 end
 
+# A :line hook that raises before a `begin` body's first line runs: that
+# `begin`'s `rescue` takes it, and the backtrace reports the traced line.
+stop_line = __LINE__ + 4
+liner = TracePoint.new(:line) { |tp| raise "line hook" if tp.lineno == stop_line }
+liner.enable
+begin
+  note(:not_rescued)
+rescue => e
+  liner.disable
+  note(:line_rescued, e.message, e.backtrace)
+end
+
 # Two TracePoints for one event: the newer's hook runs first.
 order = []
 first = TracePoint.new(:call) { |tp| order << [:first, tp.method_id] if tp.path == __FILE__ }

@@ -38,18 +38,6 @@ class UnboundMethod
   end
 end
 
-module Kernel
-  # The older tracing API: a proc called for every event, `c-call` and
-  # `c-return` among them, which nothing fires yet, so asking for one is a
-  # refusal. Nil turns it off, which with none on is nothing to do.
-  def set_trace_func(callback)
-    return nil if callback.nil?
-    raise TypeError, "trace_func needs to be Proc" unless callback.is_a?(Proc)
-    Kernel.__needs_trace_events__
-  end
-  module_function :set_trace_func
-end
-
 class TracePoint
   # Every event CRuby names, so that one of the others is a refusal and a
   # misspelling is CRuby's `ArgumentError`.
