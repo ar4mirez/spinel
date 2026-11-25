@@ -2,11 +2,10 @@
 //!
 //! Writes a `Gemfile`, a `.spinel-version` naming this Spinel, a `test/`
 //! directory, and `.gitignore` entries for `.spinel/` and `.bundle/`
-//! (docs/cli.md). It never
-//! overwrites: a file that is already there is kept as it is, so running it in
-//! an existing project, or twice, is safe. The one file it may change is
-//! `.gitignore`, and only by appending the `.spinel/` or `.bundle/` line when
-//! no line already decides about that directory.
+//! (docs/cli.md). It never overwrites: a file that is already there is kept as
+//! it is, so running it in an existing project, or twice, is safe. The one
+//! file it may change is `.gitignore`, and only by appending the `.spinel/` or
+//! `.bundle/` line when no line already decides about that directory.
 //!
 //! It writes no `.ruby-version`: mise, rbenv, asdf and chruby read that file
 //! as a request for a CRuby, and fail on `spinel-<version>` (#902). The
