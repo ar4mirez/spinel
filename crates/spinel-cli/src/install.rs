@@ -1510,6 +1510,24 @@ impl Session {
                     .iter()
                     .any(|n| n.substitute.full_name() == gem.full_name())
         });
+        // A gem with a C extension that is neither built in nor substituted
+        // would never be activated (RubyGems skips a gem whose extensions are
+        // not built), so the install fails here, before the GEM_HOME, the
+        // Gemfile or the lockfile is touched (docs/package-manager.md,
+        // section 6, step 4, #898).
+        let mut unbuilt = gem_home::unbuilt_extensions(&stored).map_err(|err| self.fail(err))?;
+        if !unbuilt.is_empty() {
+            unbuilt.sort();
+            for gem in &unbuilt {
+                self.fail(format!(
+                    "{gem} has a C extension, which Spinel does not build, and no Spinel-native substitute"
+                ));
+            }
+            return Err(self.fail(format!(
+                "the Spinel-native gems list: {}",
+                gem_substitute::LIST_URL
+            )));
+        }
         if !learned.is_empty() && lock.checksums.is_some() {
             let mut lock = lock.clone();
             for line in lock.checksums.iter_mut().flatten() {

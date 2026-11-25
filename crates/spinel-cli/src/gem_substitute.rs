@@ -58,6 +58,12 @@ pub const SUFFIX: &str = "-spinel";
 /// each name here as its substitute is published.
 pub const SUBSTITUTED: &[&str] = &[];
 
+/// Where the Spinel-native gems list is explained, with how to try a
+/// substitute before it is listed: what `spinel install` points at when a
+/// locked gem has a C extension and nothing stands in for it (#898).
+pub const LIST_URL: &str =
+    "https://github.com/ar4mirez/spinel/blob/main/docs/package-manager.md#6-native-extensions";
+
 /// The environment variable whose comma-separated names join
 /// [`SUBSTITUTED`] for one run: a substitute's author trying it from their
 /// own source before it is listed, and the integration tests. Setting it
