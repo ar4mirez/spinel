@@ -3030,3 +3030,18 @@ def s835(*a) = a; class S835H < Hash; def to_a = [:hs]; end; [s835(*S835H.new), 
 # `rescue X` is `X === exception`, so a class's own `===` decides.
 module R835; def self.===(e) = e.message == "mine"; end; [(begin; raise "mine"; rescue R835; :caught; end), (begin; begin; raise "other"; rescue R835; :caught; end; rescue; :passed; end)]  #=> [:caught, :passed]
 module R835T; def self.===(e) = 1; end; begin; raise "x"; rescue R835T; :truthy; end  #=> :truthy
+# A call by a plan that binds on the stack answers from the plan alone: its
+# class object, its class's serial and the caller's refinement bit (#746).
+# Each of these changes what the site calls between two calls from it.
+class PlC746; def m = 1; end; o = PlC746.new; r = []; 3.times { |i| r << o.m; PlC746.class_eval { def m = 2 } if i == 0 }; r  #=> [1, 2, 2]
+class PlV746; def m = 1; def bare = m; def via_self = self.m; end; v = PlV746.new; a = [v.bare, v.via_self]; PlV746.send(:private, :m); [a, v.bare, v.via_self, (begin; v.m; rescue NoMethodError => e; e.class; end)]  #=> [[1, 1], 1, 1, NoMethodError]
+class PlS746; def m = :plain; def call(o) = o.m; end; s = PlS746.new; t = PlS746.new; x = [s.call(t)]; def t.m = :single; x << s.call(t) << s.call(s); x  #=> [:plain, :single, :plain]
+class PlR746; def m = :plain; end; module PlRR746; refine(PlR746) { def m = :refined }; end; class PlU746a; def plain(o) = o.m; end; class PlU746b; using PlRR746; def ref(o) = o.m; end; q = PlR746.new; [PlU746a.new.plain(q), PlU746b.new.ref(q), PlU746a.new.plain(q), PlU746b.new.ref(q)]  #=> [:plain, :refined, :plain, :refined]
+class PlA746; def m = :a; end; class PlB746; def m = :b; end; def pl_ab746(o) = o.m; [PlA746.new, PlB746.new, PlA746.new, PlB746.new].map { |o| pl_ab746(o) }  #=> [:a, :b, :a, :b]
+def pl_o746(a, b = 2, k: 3) = [a, b, k]; [pl_o746(1), pl_o746(1, 5), pl_o746(1, k: 9), pl_o746(1, 5, k: 9)]  #=> [[1, 2, 3], [1, 5, 3], [1, 2, 9], [1, 5, 9]]
+def pl_d746(n) = n == 0 ? 0 : 1 + pl_d746(n - 1); pl_d746(3000)  #=> 3000
+# The operator masks a stretch works out are kept for the next stretch of a
+# frame with the same scope and body, so a call from a refined scope to a
+# plain one, and the return to it, each see their own (#746).
+module PlR746i; refine(Integer) { def +(o) = :refined }; end; class PlP746; def plain(a) = a + 1; def go(a) = [plain(a), plain(a)]; end; class PlQ746; using PlR746i; def ref(a) = a + 1; def go(a) = [ref(a), PlP746.new.plain(a), ref(a), a + 1]; end; [PlP746.new.go(1), PlQ746.new.go(1)]  #=> [[2, 2], [:refined, 2, :refined, :refined]]
+def pl_fib746(n) = n < 2 ? n : pl_fib746(n - 1) + pl_fib746(n - 2); class Integer; alias_method :pl_p746, :+; end; a = pl_fib746(10); class Integer; def +(o) = pl_p746(o).pl_p746(1000); end; b = pl_fib746(5); class Integer; alias_method :+, :pl_p746; end; [a, b, pl_fib746(10)]  #=> [55, 7005, 55]
