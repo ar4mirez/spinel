@@ -207,6 +207,86 @@ fn a_bare_ruby_file_is_run() {
     assert!(stdout(&out).starts_with("hello\n"));
 }
 
+/// Every word after the file is the program's `ARGV`, flags `spinel` and
+/// `run` have of their own included, and a `--` after the file is kept, as
+/// `ruby show.rb --version` and `ruby show.rb -- --help` give them (#895).
+#[test]
+fn every_word_after_the_file_is_its_argv() {
+    let show = fixture("run/show_argv.rb");
+    let cases: &[(&[&str], &str)] = &[
+        (&[&show, "--version"], "[\"--version\"]\n"),
+        (&[&show, "-v"], "[\"-v\"]\n"),
+        (&[&show, "--help"], "[\"--help\"]\n"),
+        (&[&show, "-h"], "[\"-h\"]\n"),
+        (&[&show, "-V"], "[\"-V\"]\n"),
+        (&[&show, "a", "--version"], "[\"a\", \"--version\"]\n"),
+        (&[&show, "--", "--help"], "[\"--\", \"--help\"]\n"),
+        (&["run", &show, "--help"], "[\"--help\"]\n"),
+        (&["run", &show, "-h"], "[\"-h\"]\n"),
+        (&["run", &show, "--version"], "[\"--version\"]\n"),
+        (&["run", &show, "--watch"], "[\"--watch\"]\n"),
+        (&["run", &show, "--", "--help"], "[\"--\", \"--help\"]\n"),
+        // Before the file, `--` still ends `run`'s own options.
+        (&["run", "--", &show, "--help"], "[\"--help\"]\n"),
+    ];
+    for (args, expected) in cases {
+        let out = spinel(args);
+        assert!(out.status.success(), "{args:?}: stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), *expected, "{args:?}");
+    }
+}
+
+/// A `#!/usr/bin/env spinel` script is `spinel <file>`, so its flags are its
+/// own too: a gem's bin stub answers its own `--version` (#895).
+#[test]
+fn a_shebang_script_gets_the_flags_after_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("spinel-cli-shebang-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the scratch directory is made");
+    let script = dir.join("show.rb");
+    std::fs::copy(fixture("run/show_argv.rb"), &script).expect("the fixture is copied");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("the script is made executable");
+    let bin = std::path::Path::new(SPINEL)
+        .parent()
+        .expect("the binary has a directory");
+    let mut paths = vec![bin.to_owned()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).expect("PATH joins");
+    for (arg, expected) in [
+        ("--version", "[\"--version\"]\n"),
+        ("-v", "[\"-v\"]\n"),
+        ("--help", "[\"--help\"]\n"),
+        ("-h", "[\"-h\"]\n"),
+    ] {
+        let out = Command::new(&script)
+            .arg(arg)
+            .env("PATH", &path)
+            .output()
+            .expect("the script runs");
+        assert!(out.status.success(), "{arg}: stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), expected, "{arg}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Before the file, `spinel`'s and `run`'s own flags are still theirs.
+#[test]
+fn own_flags_before_the_file_stay_spinels() {
+    let version = stdout(&spinel(&["-v"]));
+    assert!(version.starts_with("spinel "), "{version}");
+    let help = spinel(&["run", "-h"]);
+    assert!(help.status.success(), "stderr: {}", stderr(&help));
+    assert!(
+        stdout(&help).contains("Run a Ruby file"),
+        "{}",
+        stdout(&help)
+    );
+}
+
 /// An uncaught exception is Ruby's shape — `message (Class)` — on stderr, with
 /// a non-zero exit, so a script wrapping `spinel run` can tell.
 #[test]
