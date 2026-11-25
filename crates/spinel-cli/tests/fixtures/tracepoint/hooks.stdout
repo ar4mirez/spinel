@@ -28,3 +28,4 @@
 [:threads, [nil]]
 [:targeted, [[:call, :target_me, 148], [:line, :target_me, 149], [:line, :target_me, 150], [:line, :target_me, 151], [:return, :target_me, 152]]]
 [:lined, [150], 150]
+[:endless, [[:call, :inc, 166], [:return, :inc, 166], [:call, :pick, 167], [:line, :pick, 167], [:return, :pick, 167], [:call, :paren, 168], [:line, :paren, 168], [:return, :paren, 168], [:call, :split, 169], [:return, :split, 170]]]

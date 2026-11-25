@@ -160,4 +160,19 @@ line_tp.enable(target: method(:target_me), target_line: line) { target_me }
 note(:targeted, targeted)
 note(:lined, lined, line)
 
+# An endless def's lone statement has no `:line`; an `if` in one, and the
+# statements of a parenthesised one, do.
+class Endless
+  def inc(x) = x + 1
+  def pick(x) = x ? 1 : 2
+  def paren(x) = (y = x; y + 1)
+  def split(x) =
+    x + 2
+end
+endless = []
+e = Endless.new
+tp = TracePoint.new(:line, :call, :return) { |t| endless << [t.event, t.method_id, t.lineno] if t.defined_class == Endless }
+tp.enable { e.inc(1); e.pick(1); e.paren(1); e.split(1) }
+note(:endless, endless)
+
 OUT.each { |values| p values }

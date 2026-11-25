@@ -293,6 +293,10 @@ struct Compiler {
     /// event for: `prism_compile.c`'s `last_line`, one per body, so a
     /// second statement on a line has none.
     last_line_event: i32,
+    /// Set by [`Compiler::def_expr`] for the child it compiles next: the
+    /// body is an endless def's (`def f(x) = x + 1`), whose lone statement
+    /// Prism does not flag for a `:line` event (#127).
+    endless_def: bool,
     /// The line the next emitted instruction belongs to; 0 before any is known.
     line: i32,
     /// See [`Iseq::block_level`].
@@ -482,6 +486,7 @@ impl Compiler {
             lines: Vec::new(),
             line_events: Vec::new(),
             last_line_event: 0,
+            endless_def: false,
             line: 0,
             block_level: 0,
             first_line: 0,
@@ -3411,6 +3416,7 @@ impl Compiler {
     /// cannot see the locals around the `def` — which is Ruby, and is the one
     /// place a nested scope differs from a block.
     fn def_expr(&mut self, def: &spinel_ast::Def, span: Span) -> Emit {
+        self.endless_def = def.endless;
         let child = self.child_iseq(&def.name, &def.params, &def.locals, &def.body, true, span)?;
         let name = self.symbol(&def.name);
         let index = self.push_child(child);
@@ -3885,6 +3891,7 @@ impl Compiler {
         lambda: bool,
         span: Span,
     ) -> Result<Iseq, Unsupported> {
+        let endless = std::mem::take(&mut self.endless_def);
         let mut child = Compiler::nested(name, locals, self, barrier);
         if let Some(source) = &self.source {
             child.first_line = source.line(span.start);
@@ -3902,7 +3909,13 @@ impl Compiler {
         // the binder can enter the body at the first default it has to compute
         // and fall through the rest. The body proper starts after them.
         child.emit_defaults(params, span)?;
-        child.statements(body, true)?;
+        // An endless def's body has no `:line` event of its own, measured on
+        // CRuby 4.0.10; an `if` in it, or the statements of a parenthesised
+        // body, still have theirs.
+        match body {
+            [only] if endless => child.expr(only)?,
+            _ => child.statements(body, true)?,
+        }
         // A method's or class body's last `Leave` is on its `end` line, as
         // CRuby's `leave` is: where a `:return` event says a body that falls
         // off its end returned (#127), measured on 4.0.9. An explicit

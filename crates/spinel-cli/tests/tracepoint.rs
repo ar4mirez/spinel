@@ -25,7 +25,7 @@
 //!   `:return` on the line a hook raised on, two `TracePoint`s' order,
 //!   `$!` inside a hook,
 //!   the names, classes and bindings an event reports, one thread's events,
-//!   and `enable(target:, target_line:)`.
+//!   `enable(target:, target_line:)`, and the `:line`s of endless defs.
 
 use std::path::PathBuf;
 use std::process::Command;
