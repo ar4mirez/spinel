@@ -114,7 +114,10 @@ Each item below is covered by tests in this repository: ruby/spec under `spec/`,
   4. Install with `SPINEL_SUBSTITUTES=puma,nio4r spinel install`. `.spinel/substitutions.json` lists what was substituted, and the lockfile still names upstream's `puma` and `nio4r`. The gem source is needed whenever `spinel install` runs, not when the app does.
   5. Start Puma with `spinel run .spinel/gem_home/bin/puma`.
 
+  [spinel-demo](https://github.com/ar4mirez/spinel-demo) is a worked example of these steps.
+
   Until [#894](https://github.com/ar4mirez/spinel/issues/894) is fixed, `spinel install --frozen` rejects a lockfile whose gems come from a `source` block.
+- **Example apps.** [spinel-demo](https://github.com/ar4mirez/spinel-demo) collects example apps that run on Spinel.
 - **Rails** does not boot yet. `spinel install` can install a `rails new` lockfile, but loading Rails waits on the `zeitwerk` and `activesupport` test suites passing ([#130](https://github.com/ar4mirez/spinel/issues/130)) and on a first boot ([#131](https://github.com/ar4mirez/spinel/issues/131)).
 
 ## Building from source
