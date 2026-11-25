@@ -1,0 +1,125 @@
+name: mise install
+
+# `mise use -g github:ar4mirez/spinel[@<version>]` installs a published
+# release on each platform `release.yml` builds for. mise's github backend
+# picks the asset by its name, `spinel-<cpu>-<os>`, with no registry entry
+# and no config; this checks it picks the right one, a bare binary it puts on
+# PATH, both pinned to a version and unpinned (the latest release).
+#
+# A release published by `release.yml`'s own token starts no other workflow,
+# so `release.yml` calls this one after `publish`, once the assets are up. A
+# pull request that changes this file, or a manual run with no version, checks
+# the latest release.
+on:
+  pull_request:
+    paths: ['.github/workflows/mise-install.yml']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release to install pinned, without the `v` (`latest` for the latest release)
+        default: latest
+  workflow_call:
+    inputs:
+      version:
+        description: The release to install pinned, without the `v`
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || 'latest' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  install:
+    name: mise install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The runners `release.yml` builds each binary on.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-26]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_REPO: ar4mirez/spinel
+      REQUESTED: ${{ inputs.version || 'latest' }}
+    steps:
+      # The official action, without installing any tool or restoring a
+      # cache: each check below starts mise from empty directories of its own.
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: false
+          github_token: ${{ github.token }}
+
+      # `RUBY_PLATFORM` as `spinel --version` reports it (crates/spinel-vm/
+      # build.rs): `x86_64-linux`, `aarch64-linux`, `x86_64-darwin<N>`,
+      # `arm64-darwin<N>`; and the version each check expects.
+      - name: What to expect
+        shell: bash
+        run: |
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64) platform='x86_64-linux' ;;
+            Linux-ARM64) platform='aarch64-linux' ;;
+            macOS-X64) platform='x86_64-darwin[0-9]*' ;;
+            macOS-ARM64) platform='arm64-darwin[0-9]*' ;;
+            *) echo "::error::no spinel release for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+          esac
+          latest=$(gh release view --json tagName -q .tagName)
+          latest=${latest#v}
+          pinned=${REQUESTED#v}
+          if [ "${pinned}" = latest ]; then pinned=${latest}; fi
+          echo "pinned ${pinned}, unpinned ${latest}, platform ${platform}"
+          {
+            echo "PLATFORM=${platform}"
+            echo "PINNED=${pinned}"
+            echo "LATEST=${latest}"
+          } >> "$GITHUB_ENV"
+          mise --version
+
+      # Each in a clean mise: its own data, config, cache and state
+      # directories and a working directory with no config, so the global
+      # config `-g` writes is the only one and nothing is installed before.
+      - name: mise use -g, pinned and unpinned
+        shell: bash
+        run: |
+          check() {
+            local spec=$1 want=$2 root
+            root=$(mktemp -d "${RUNNER_TEMP}/mise.XXXXXX")
+            echo "::group::mise use -g ${spec} (want ${want})"
+            # A subshell, so the exports stay in it; `set -e` holds in it
+            # because it is not the left side of `||`.
+            (
+              set -euo pipefail
+              export MISE_DATA_DIR="${root}/data" MISE_CONFIG_DIR="${root}/config" \
+                MISE_CACHE_DIR="${root}/cache" MISE_STATE_DIR="${root}/state"
+              export MISE_GLOBAL_CONFIG_FILE="${MISE_CONFIG_DIR}/config.toml"
+              mkdir -p "${root}/cwd" && cd "${root}/cwd"
+              mise use -g "${spec}"
+              cat "${MISE_GLOBAL_CONFIG_FILE}"
+              export PATH="${MISE_DATA_DIR}/shims:${PATH}"
+              bin=$(mise which spinel)
+              echo "spinel is ${bin}"
+              file "${bin}"
+              # Through the shim on PATH, as a shell with mise set up runs it.
+              out=$(spinel --version)
+              echo "${out}"
+              # PLATFORM unquoted: it is a pattern on macOS.
+              # shellcheck disable=SC2027
+              case "${out}" in
+                "spinel ${want} (ruby "*") ["${PLATFORM}"]") ;;
+                *) echo "::error::${spec}: \`spinel --version\` is '${out}', not spinel ${want} for ${PLATFORM}"; exit 1 ;;
+              esac
+              spinel -e 'puts RUBY_ENGINE_VERSION'
+            )
+            echo "::endgroup::"
+          }
+          check "github:ar4mirez/spinel@${PINNED}" "${PINNED}"
+          # Unpinned, mise resolves `latest` to the newest release at least
+          # `minimum_release_age` old, 24 hours by default, so a release this
+          # new is not yet what a user's `mise use -g` gets. Checked with no
+          # wait, as `release.yml` runs it minutes after publishing.
+          MISE_MINIMUM_RELEASE_AGE=0s check "github:ar4mirez/spinel" "${LATEST}"
