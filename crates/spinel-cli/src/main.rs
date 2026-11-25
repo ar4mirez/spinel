@@ -575,7 +575,23 @@ fn main() -> ExitCode {
 
     // `arg_required_else_help` means a bare `spinel` never reaches this point: clap
     // prints help and exits non-zero, so a typo is never a silent success.
-    let cli = Cli::parse();
+    // Every word after the program's file is its `ARGV`, `--version`, `-h`
+    // and `--` included, as `ruby show.rb --help` gives `["--help"]` (#895).
+    // Clap reads only the words before them, so none can be taken for
+    // `spinel`'s or `run`'s own flags; the program gets the rest as they are.
+    let cli = match program_args_start(&words) {
+        Some(start) => {
+            // `start + 1`: the program name comes first in `args_os`.
+            let mut cli = Cli::parse_from(std::env::args_os().take(start + 1));
+            let program_args = words[start..].to_vec();
+            match &mut cli.command {
+                Some(Command::Run { args, .. }) => *args = program_args,
+                _ => cli.args = program_args,
+            }
+            cli
+        }
+        None => Cli::parse(),
+    };
 
     if cli.version {
         println!("{}", spinel_vm::description());
@@ -807,6 +823,33 @@ fn pack_command(payload: &Path, output: &Path) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where the program's `ARGV` starts in `spinel`'s words (the program name
+/// left out), when they name a program file: the word after the file in
+/// `spinel <file>`, and in `spinel run [--watch|--dump-bytecode|
+/// --strict-ruby-version]... [--] <file>`. `None` for every other command
+/// line, which clap reads whole, as it does `run -h` before the file.
+fn program_args_start(words: &[String]) -> Option<usize> {
+    use clap::CommandFactory;
+    let first = words.first()?;
+    if first == "run" {
+        for (i, word) in words.iter().enumerate().skip(1) {
+            match word.as_str() {
+                // After `--`, the next word is the file even if named like a
+                // flag, as `watch_run`'s child is given it.
+                "--" => return (i + 1 < words.len()).then_some(i + 2),
+                "--watch" | "--dump-bytecode" | "--strict-ruby-version" => {}
+                flag if flag.starts_with('-') => return None,
+                _ => return Some(i + 1),
+            }
+        }
+        return None;
+    }
+    // A subcommand's words are its own; a first word starting with `-` is
+    // `spinel`'s own flag, as `ruby`'s were handled before this.
+    let subcommand = first == "help" || Cli::command().find_subcommand(first).is_some();
+    (!first.starts_with('-') && !subcommand).then_some(1)
 }
 
 /// Whether a bare argument is a Ruby file rather than a mistyped subcommand.
