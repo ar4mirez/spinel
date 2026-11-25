@@ -334,6 +334,12 @@ pub fn handle_signals(scope: &mut HandleScope<'_>) -> Result<spinel_vm::Value, s
     interp::eval_in(scope, &mut frame, &iseq)
 }
 
+/// The file the code that ends the program is compiled as: the core
+/// library's, as CRuby's `rb_ec_exec_end_proc` is C, so its frames stay out
+/// of every backtrace an `at_exit` block or `trap(:EXIT)` handler sees
+/// (#899) and their `caller` is as empty as CRuby's.
+const EXIT_PATH: &str = "<internal:exit>";
+
 /// End the program: run its `at_exit` blocks and answer its exit status —
 /// `SystemExit#status` when `exit` ended it, 1 for another uncaught
 /// exception (left in `$!` by the VM), 0 otherwise. `None` when the status
@@ -344,7 +350,7 @@ pub fn exit_status(scope: &mut HandleScope<'_>, raised: bool) -> Option<u8> {
     } else {
         b"Kernel.__exit__(nil)"
     };
-    let parsed = spinel_parse::parse_file("<exit>", source);
+    let parsed = spinel_parse::parse_file(EXIT_PATH, source);
     let iseq = compile::program(&parsed.program).ok()?;
     let mut frame = interp::Frame::new(0);
     let status = interp::eval_in(scope, &mut frame, &iseq).ok()?;
@@ -356,7 +362,7 @@ pub fn exit_status(scope: &mut HandleScope<'_>, raised: bool) -> Option<u8> {
 /// keeps quiet about. Answers false when there was nothing to print it from,
 /// so the caller can say something itself.
 pub fn report_uncaught(scope: &mut HandleScope<'_>) -> bool {
-    let parsed = spinel_parse::parse_file("<exit>", b"Kernel.__report__");
+    let parsed = spinel_parse::parse_file(EXIT_PATH, b"Kernel.__report__");
     let Ok(iseq) = compile::program(&parsed.program) else {
         return false;
     };
@@ -370,7 +376,7 @@ pub fn report_uncaught(scope: &mut HandleScope<'_>) -> bool {
 /// none.
 pub fn uncaught_signal(scope: &mut HandleScope<'_>) -> Option<i32> {
     let parsed = spinel_parse::parse_file(
-        "<exit>",
+        EXIT_PATH,
         b"(name = Kernel.__signal_of__) && Signal.list[name]",
     );
     let iseq = compile::program(&parsed.program).ok()?;
@@ -382,7 +388,7 @@ pub fn uncaught_signal(scope: &mut HandleScope<'_>) -> Option<i32> {
 /// Finish the program once its error is reported: kill the other threads,
 /// run the finalizers left, and finish every IO's converter, in that order.
 pub fn cleanup(scope: &mut HandleScope<'_>) {
-    let parsed = spinel_parse::parse_file("<exit>", b"Kernel.__cleanup__");
+    let parsed = spinel_parse::parse_file(EXIT_PATH, b"Kernel.__cleanup__");
     let Ok(iseq) = compile::program(&parsed.program) else {
         return;
     };
