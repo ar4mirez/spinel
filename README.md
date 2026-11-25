@@ -26,7 +26,7 @@ mise use -g github:ar4mirez/spinel@0.1.0    # a pinned version
 spinel --version                            # spinel 0.1.0 (ruby 4.0.0) [x86_64-linux]
 ```
 
-If mise's `minimum_release_age` setting is set (for example to `24h`), mise does not install a release younger than that, so for that long after a release the first line gets the release before it, or, while there is none, fails with `no versions found ... matching minimum_release_age`. Name the version instead, as in the second line. A project pins its own copy in its `mise.toml` with `mise use github:ar4mirez/spinel@0.1.0` (no `-g`).
+mise does not install a release younger than its `minimum_release_age` setting (24 hours by default: mise 2026.11.12 applies it with the setting unset), so for the first day after a release the first line gets the release before it, or, while there is none, fails with `no versions found ... matching minimum_release_age`. Name the version instead, as in the second line. A project pins its own copy in its `mise.toml` with `mise use github:ar4mirez/spinel@0.1.0` (no `-g`).
 
 ### Download a binary
 
