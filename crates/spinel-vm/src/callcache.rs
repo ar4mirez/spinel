@@ -232,6 +232,26 @@ pub struct Direct {
     pub name: SymbolId,
     /// The receiver class the entry holds the method for.
     pub class: ClassId,
+    /// `class`'s serial when the plan was made, which is its entry's: the
+    /// plan's own guard, with [`Direct::class_object`], so that a call it
+    /// answers reads neither the entry nor `class_of`'s table (#746). Sound
+    /// because a plan is made beside the entry that answered the call, and
+    /// [`CallCaches::fill`] and [`CallCaches::promote`] replace and swap the
+    /// two together: while this plan is the slot's, so is that entry.
+    pub serial: u64,
+    /// What the entry's method says, kept here for the same reason: the
+    /// lexical scope its `def` was written in, the class it was found on,
+    /// and who may call it.
+    pub cref: CrefId,
+    pub owner: ClassId,
+    pub callable: Callable,
+    /// How many locals the callee's body has: where its operands start,
+    /// above the call's receiver.
+    pub locals: u32,
+    /// Whether the site splats: a call by such a plan reads the site, for
+    /// what its Arrays come to, where any other answers from the plan alone
+    /// (`interp::send_direct`).
+    pub splats: bool,
     /// How many positional arguments the plan binds. The site's own count,
     /// except at a site that splats: there it is the count the splatted
     /// Arrays came to when the plan was made, and a call whose Arrays come
@@ -253,6 +273,21 @@ pub struct Direct {
     /// The optional parameters, positional or keyword, that a call from this
     /// site does not supply.
     pub undef: Box<[u16]>,
+}
+
+/// Whom a call by a [`Direct`] plan may be made for: the method's
+/// [`Visibility`] and the site, decided once when the plan is made, as
+/// `visibility_refusal` decides them for the cases that need no class
+/// lookup. `protected` is `dispatch`'s, so no plan is made for it.
+///
+/// [`Visibility`]: crate::class::Visibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callable {
+    /// Public, or private from a site with no receiver written.
+    Always,
+    /// Private from a site with a receiver written: only when the receiver
+    /// is the caller's `self`.
+    OnSelf,
 }
 
 /// One heap's inline caches.

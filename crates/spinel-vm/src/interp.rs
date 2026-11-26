@@ -43,7 +43,7 @@ use crate::bytecode::{
     BinOp, BlockRef, CallSite, CatchKind, ClassDef, ConstScope, DefKind, Insn, Iseq, Literal,
     MatchRef, ParamSpec,
 };
-use crate::callcache::{CallCaches, Direct, Entered, NativePlan, Plan, Yielded};
+use crate::callcache::{CallCaches, Callable, Direct, Entered, NativePlan, Plan, Yielded};
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
@@ -5740,17 +5740,52 @@ fn leave_in_place(
     frames: &mut Vec<Call>,
     leave: bool,
 ) {
-    let value = stack.pop().unwrap_or(Value::NIL);
+    leave_here(scope, stack, frames, leave);
+}
+
+/// [`leave_in_place`]'s body, inlined into [`calls_loop`], where every
+/// return the loop takes comes through it (#746): out of line, with a pop,
+/// a truncation and a push on the `Vec`, a return there was about 60
+/// instructions retired; inlined and written to its slot, about 30.
+///
+/// The value goes straight to the slot at the frame's floor, where the
+/// pop, the truncation and the push between them would have put it, when
+/// it is above the floor, as a frame's value always is; the stack is then
+/// as those three would have left it, and so is its low mark: what is fresh
+/// starts at the floor.
+#[inline(always)]
+fn leave_here(scope: &mut HandleScope<'_>, stack: &mut Stack, frames: &mut Vec<Call>, leave: bool) {
     let done = frames.last().expect("a frame to leave");
     scope.set_errinfo(done.errinfo_on_entry);
-    stack.truncate(done.floor);
-    let value = if leave && done.booleanizes_value {
-        bool_value(value.is_truthy())
+    let floor = done.floor;
+    let kept = !done.keeps_receiver && !done.discards_value;
+    let booleanizes = leave && done.booleanizes_value;
+    let len = stack.values.len();
+    if len > floor {
+        let value = stack.values[len - 1];
+        let value = if booleanizes {
+            bool_value(value.is_truthy())
+        } else {
+            value
+        };
+        if kept {
+            stack.values[floor] = value;
+            stack.values.truncate(floor + 1);
+        } else {
+            stack.values.truncate(floor);
+        }
+        stack.low = stack.low.min(floor);
     } else {
-        value
-    };
-    if !done.keeps_receiver && !done.discards_value {
-        stack.push(value);
+        let value = stack.pop().unwrap_or(Value::NIL);
+        stack.truncate(floor);
+        let value = if booleanizes {
+            bool_value(value.is_truthy())
+        } else {
+            value
+        };
+        if kept {
+            stack.push(value);
+        }
     }
     frames.truncate(frames.len() - 1);
 }
@@ -5765,10 +5800,13 @@ fn returns_in_place(frame: &Call, pc: usize) -> bool {
     if frame.home != frame.id || frame.raises_receiver || frame.iseq.eval_in_block {
         return false;
     }
+    // Most bodies have no catch table at all, and then nothing to look up.
+    let catch_table = &frame.iseq.catch_table;
+    if catch_table.is_empty() {
+        return true;
+    }
     let at = u32::try_from(pc.saturating_sub(1)).unwrap_or(u32::MAX);
-    !frame
-        .iseq
-        .catch_table
+    !catch_table
         .iter()
         .any(|entry| entry.kind == CatchKind::Ensure && entry.covers(at))
 }
@@ -5812,6 +5850,12 @@ fn send_simple(
     ids: &mut u64,
 ) -> Option<Value> {
     let top = frames.len() - 1;
+    if let Plan::Direct(plan) = scope.call_caches().plan(frames[top].cache_base + index)
+        && !plan.splats
+        && let Some(receiver) = send_direct(scope, stack, frames, plan, ids)
+    {
+        return Some(receiver);
+    }
     let site = &frames[top].iseq.call_sites[index as usize];
     if site.block != BlockRef::None || !site.splats.is_empty() || site.kwsplat {
         if site.block == BlockRef::None && !site.kwsplat {
@@ -5859,85 +5903,90 @@ fn send_bound<const SPLATS: bool>(
     } else {
         pushed
     };
-    // The class the site's plan was worked out for, when the receiver's
-    // header names that class's object: one load and a compare, where
-    // `class_of` goes through the table of remembered class ids. A class
-    // object is never collected — the class table roots every one — so the
-    // object names one class for the life of the heap.
-    let class = match scope.call_caches().plan(slot) {
-        Plan::Direct(plan) if scope.class_object_of(receiver) == Some(plan.class_object) => {
-            plan.class
+    // A direct plan answers for itself when the receiver's header names the
+    // class object it was made for and that class's serial is the one it
+    // was made at (#746). A plan is made beside the entry that answered the
+    // call, and `CallCaches::fill` and `promote` replace and swap the two
+    // together, so a `Direct` plan's class and serial are its entry's, and
+    // the method it records is the one its entry holds. One load and a
+    // compare each, where the entry's own guard goes through `class_of`'s
+    // table of remembered class ids and the entry's slot. A class object is
+    // never collected — the class table roots every one — so the object
+    // names one class for the life of the heap.
+    let held = match scope.call_caches().plan(slot) {
+        Plan::Direct(plan)
+            if scope.class_object_of(receiver) == Some(plan.class_object)
+                && scope.classes().serial(plan.class) == plan.serial =>
+        {
+            Some((plan.class, plan.callable))
         }
-        _ => known_class_of(scope, receiver)?,
+        _ => None,
     };
-    let classes = scope.classes();
-    if classes.cref_refined(frame.cref)
-        && classes
-            .refined_lookup(
-                class,
-                frame.iseq.symbol_ids()[site.name as usize],
-                frame.cref,
-            )
-            .is_some()
-    {
-        return None;
-    }
-    let serial = classes.serial(class);
-    // An entry for another class may have this one's behind it. Brought in
-    // front here; when its plan is not one this binds, the caller tries the
-    // call again by that plan.
-    let method = match scope.call_caches().get(slot, class, serial) {
-        Some(method) => method,
-        None if scope.call_caches_mut().promote(slot, class, serial) => {
-            scope.call_caches().get(slot, class, serial)?
+    if let Some((class, callable)) = held {
+        if refined_send(scope, frame, site, class) || !callable_for(callable, frame, receiver) {
+            return None;
         }
-        None => return None,
-    };
-    // `visibility_refusal`'s answer for the two cases that need no class
-    // lookup; `protected` is `dispatch`'s.
-    let visible = match method.visibility {
-        Visibility::Public => true,
-        Visibility::Private => site.implicit_self || frame.receiver == receiver,
-        Visibility::Protected => false,
-    };
-    if !visible {
-        return None;
-    }
-    if matches!(scope.call_caches().plan(slot), Plan::Unknown) {
-        let plan = match scope.definitions().get(method.body) {
-            Some(Definition::Iseq(iseq)) => {
-                let iseq = Arc::clone(iseq);
-                let class_object = scope.class_object(class);
-                direct_plan(
-                    scope.call_caches_mut(),
-                    site,
-                    argc,
-                    frame.iseq.symbol_ids(),
-                    &iseq,
-                    (class, class_object),
-                )
+    } else {
+        let class = known_class_of(scope, receiver)?;
+        if refined_send(scope, frame, site, class) {
+            return None;
+        }
+        let serial = scope.classes().serial(class);
+        // An entry for another class may have this one's behind it. Brought
+        // in front here; when its plan is not one this binds, the caller
+        // tries the call again by that plan.
+        let method = match scope.call_caches().get(slot, class, serial) {
+            Some(method) => method,
+            None if scope.call_caches_mut().promote(slot, class, serial) => {
+                scope.call_caches().get(slot, class, serial)?
             }
-            // Public, or private from a site with no receiver written, which
-            // is a call `visible` above answers yes for every time: the plan
-            // then needs no visibility check of its own.
-            Some(&Definition::Native(native))
-                if given == 0
-                    && !SPLATS
-                    && (method.visibility == Visibility::Public
-                        || (method.visibility == Visibility::Private && site.implicit_self))
-                    && has_native_light(native, argc) =>
-            {
-                Plan::Native(NativePlan {
-                    native,
-                    class,
-                    class_object: scope.class_object(class),
-                    name: frame.iseq.symbol_ids()[site.name as usize],
-                    argc: site.argc,
-                })
-            }
-            _ => Plan::General,
+            None => return None,
         };
-        scope.call_caches_mut().set_plan(slot, plan);
+        if !visible_send(method.visibility, site, frame, receiver) {
+            return None;
+        }
+        if matches!(scope.call_caches().plan(slot), Plan::Unknown) {
+            let plan = match scope.definitions().get(method.body) {
+                Some(Definition::Iseq(iseq)) => {
+                    let iseq = Arc::clone(iseq);
+                    let class_object = scope.class_object(class);
+                    direct_plan(
+                        scope.call_caches_mut(),
+                        site,
+                        argc,
+                        frame.iseq.symbol_ids(),
+                        &iseq,
+                        Planned {
+                            class,
+                            class_object,
+                            serial,
+                            method,
+                        },
+                    )
+                }
+                // Public, or private from a site with no receiver written,
+                // which is a call `visible_send` answers yes for every time:
+                // the plan then needs no visibility check of its own.
+                Some(&Definition::Native(native))
+                    if given == 0
+                        && !SPLATS
+                        && (method.visibility == Visibility::Public
+                            || (method.visibility == Visibility::Private
+                                && site.implicit_self))
+                        && has_native_light(native, argc) =>
+                {
+                    Plan::Native(NativePlan {
+                        native,
+                        class,
+                        class_object: scope.class_object(class),
+                        name: frame.iseq.symbol_ids()[site.name as usize],
+                        argc: site.argc,
+                    })
+                }
+                _ => Plan::General,
+            };
+            scope.call_caches_mut().set_plan(slot, plan);
+        }
     }
     let Plan::Direct(plan) = scope.call_caches().plan(slot) else {
         return None;
@@ -5951,11 +6000,70 @@ fn send_bound<const SPLATS: bool>(
         }
         splat_in_place(scope, &mut stack.values, at + 1, pushed, &site.splats);
     }
+    push_direct(scope, stack, frames, plan, at, argc, receiver, ids);
+    Some(receiver)
+}
+
+/// [`send_simple`] for a site whose plan binds on the stack and splats
+/// nothing: the call is answered by the plan alone, without reading the
+/// site (#746). The site was checked when the plan was made — it passes no
+/// block and no keyword splat, and `fill` forgets a plan with its entry —
+/// and the plan keeps what the call needs of it: how many arguments it
+/// pushes, the name a refinement is looked up by, and whether the method is
+/// one the site may call whatever the receiver.
+///
+/// `None`, with nothing changed, for anything the plan does not answer for
+/// itself; [`send_bound`] then asks as it always has.
+#[inline(always)]
+fn send_direct(
+    scope: &HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    plan: &Direct,
+    ids: &mut u64,
+) -> Option<Value> {
+    let frame = frames.last().expect("a frame to send from");
+    let argc = usize::from(plan.argc);
+    let at = stack.len().checked_sub(argc + plan.keywords.len() + 1)?;
+    let receiver = stack[at];
+    if scope.class_object_of(receiver) != Some(plan.class_object) {
+        return None;
+    }
+    let classes = scope.classes();
+    if classes.serial(plan.class) != plan.serial
+        || (classes.cref_refined(frame.cref)
+            && classes
+                .refined_lookup(plan.class, plan.name, frame.cref)
+                .is_some())
+        || !callable_for(plan.callable, frame, receiver)
+    {
+        return None;
+    }
+    push_direct(scope, stack, frames, plan, at, argc, receiver, ids);
+    Some(receiver)
+}
+
+/// What [`send_bound`] and [`send_direct`] do once nothing can decline the
+/// call: the receiver at `at` goes, the arguments above it become the
+/// callee's first locals, and the frame is pushed around them.
+#[inline(always)]
+#[expect(clippy::too_many_arguments, reason = "what a call has in hand")]
+fn push_direct(
+    scope: &HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    plan: &Direct,
+    at: usize,
+    argc: usize,
+    receiver: Value,
+    ids: &mut u64,
+) {
+    let given = plan.keywords.len();
     *ids += 1;
     let id = *ids;
     // Element by element rather than through `remove`, `copy_from_slice`
     // and `resize`, each a call for a handful of values.
-    let base = at + plan.iseq.locals.len();
+    let base = at + plan.locals as usize;
     let values = &mut stack.values;
     if plan.in_order {
         // The keywords are written in the order their parameters' slots
@@ -5980,7 +6088,7 @@ fn send_bound<const SPLATS: bool>(
             locals_on_stack: true,
             floor: at,
             receiver,
-            cref: method.cref,
+            cref: plan.cref,
             block: Value::NIL,
             pc: 0,
             base,
@@ -5995,14 +6103,13 @@ fn send_bound<const SPLATS: bool>(
             home: id,
             breaks: 0,
             errinfo_on_entry,
-            owner: Some(method.owner),
+            owner: Some(plan.owner),
             defined_as: Some(plan.name),
             // A method's body: see `trace_mark`.
             trace: FRAME_METHOD,
             rare: None,
         },
     );
-    Some(receiver)
 }
 
 /// Bring the entry `frame`'s site `index` holds behind its own back in
@@ -6705,19 +6812,29 @@ fn push_call(frames: &mut Vec<Call>, frame: Call) {
 /// `copy_from_slice` and `resize`, each a call for a handful of values.
 #[inline(always)]
 fn place_arguments(values: &mut Vec<Value>, at: usize, placed: usize, base: usize) {
-    for index in at..at + placed {
-        values[index] = values[index + 1];
+    // The receiver and the arguments above it as one window, so that the
+    // moves are bounds-checked once rather than twice each, and the counts
+    // most calls pass moved without a loop (#746).
+    let window = &mut values[at..at + placed + 1];
+    match window {
+        [_] => {}
+        [receiver, first] => *receiver = *first,
+        [receiver, first, second] => (*receiver, *first) = (*first, *second),
+        _ => window.copy_within(1.., 0),
     }
     // Every parameter is a local, so the frame is at least one shorter than
-    // what the call pushed: the receiver.
+    // what the call pushed: the receiver. When every local is a parameter
+    // the call passed, that one is all there is to drop.
+    if base == at + placed {
+        values.truncate(base);
+        return;
+    }
     if base < values.len() {
         values.truncate(base);
     } else {
         values.resize(base, Value::NIL);
     }
-    for value in &mut values[at + placed..base] {
-        *value = Value::NIL;
-    }
+    values[at + placed..base].fill(Value::NIL);
 }
 
 /// [`place_arguments`] for a site whose `given` keywords are not written in
@@ -6769,8 +6886,19 @@ fn direct_plan(
     argc: usize,
     caller_symbols: &[SymbolId],
     iseq: &Arc<Iseq>,
-    (class, class_object): (ClassId, Value),
+    planned: Planned,
 ) -> Plan {
+    let Ok(locals) = u32::try_from(iseq.locals.len()) else {
+        return Plan::General;
+    };
+    // Who the plan lets call, as `visible_send` answers it: `protected` is
+    // `dispatch`'s, which looks the caller's class up.
+    let callable = match planned.method.visibility {
+        Visibility::Public => Callable::Always,
+        Visibility::Private if site.implicit_self => Callable::Always,
+        Visibility::Private => Callable::OnSelf,
+        Visibility::Protected => return Plan::General,
+    };
     let params = &iseq.params;
     let required = params.required.len();
     let optional = params.optional.len();
@@ -6833,12 +6961,66 @@ fn direct_plan(
         cache_base,
         in_order,
         name: caller_symbols[site.name as usize],
-        class,
+        class: planned.class,
+        serial: planned.serial,
+        cref: planned.method.cref,
+        owner: planned.method.owner,
+        callable,
+        locals,
+        splats: !site.splats.is_empty(),
         argc: u16::try_from(argc).unwrap_or(u16::MAX),
-        class_object,
+        class_object: planned.class_object,
         keywords: keywords.into_boxed_slice(),
         undef: undef.into_boxed_slice(),
     }))
+}
+
+/// What [`direct_plan`] makes a plan for: the receiver class and its object,
+/// the class's serial when its entry answered, and the method the entry
+/// holds, which the plan answers for in its place (see [`Direct::serial`]).
+///
+/// [`Direct::serial`]: crate::callcache::Direct::serial
+struct Planned {
+    class: ClassId,
+    class_object: Value,
+    serial: u64,
+    method: Method,
+}
+
+/// Whether a refinement active in `frame`'s scope answers `site`'s name for
+/// `class`, which the fast paths leave to `dispatch`.
+#[inline(always)]
+fn refined_send(scope: &HandleScope<'_>, frame: &Call, site: &CallSite, class: ClassId) -> bool {
+    let classes = scope.classes();
+    classes.cref_refined(frame.cref)
+        && classes
+            .refined_lookup(
+                class,
+                frame.iseq.symbol_ids()[site.name as usize],
+                frame.cref,
+            )
+            .is_some()
+}
+
+/// Whether a call by a plan that says `callable` may be made from `frame`
+/// for `receiver`: see [`Callable`].
+#[inline(always)]
+fn callable_for(callable: Callable, frame: &Call, receiver: Value) -> bool {
+    match callable {
+        Callable::Always => true,
+        Callable::OnSelf => frame.receiver == receiver,
+    }
+}
+
+/// `visibility_refusal`'s answer for the two cases that need no class
+/// lookup; `protected` is `dispatch`'s.
+#[inline(always)]
+fn visible_send(visibility: Visibility, site: &CallSite, frame: &Call, receiver: Value) -> bool {
+    match visibility {
+        Visibility::Public => true,
+        Visibility::Private => site.implicit_self || frame.receiver == receiver,
+        Visibility::Protected => false,
+    }
 }
 
 /// Take a call site's operands off the stack.
@@ -20338,7 +20520,8 @@ fn light_stretch(
     // How many may run before the budget reaches `limit`.
     let room = *budget - limit;
     let mut ran = 0;
-    stretch::<false>(scope, stack, frame, pc, &mut ran, room);
+    let mut masks = Masks::NONE;
+    stretch::<false>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20364,7 +20547,8 @@ fn more_stretch(
     // How many may run before the budget reaches `limit`.
     let room = *budget - limit;
     let mut ran = 0;
-    stretch::<true>(scope, stack, frame, pc, &mut ran, room);
+    let mut masks = Masks::NONE;
+    stretch::<true>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20470,6 +20654,10 @@ fn native_stretch<const MORE: bool>(
 /// stretch stops early at a backward jump once it reaches `room`. Answers
 /// the instruction it stopped at, read again once the loop is done rather
 /// than carried through it, so the loop keeps its registers.
+///
+/// `masks` carries the operator masks from one stretch to the next: see
+/// [`Masks`]. A caller that runs one stretch alone hands it
+/// [`Masks::NONE`], and the compiler drops what it would have kept.
 #[inline(always)]
 fn stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
@@ -20478,14 +20666,15 @@ fn stretch<const MORE: bool>(
     pc: &mut usize,
     ran: &mut u64,
     room: u64,
+    masks: &mut Masks,
 ) -> Insn {
     let code = &frame.iseq.insns[..];
     let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack);
     let mut at = *pc;
     let mut count = *ran;
     // Made and dropped within this run, which is what `IvarView::read` asks
-    // of the view it holds.
-    let mut lazy = Lazy::default();
+    // of the view it holds; the masks alone come from the stretches before.
+    let mut lazy = masks.seed(frame);
     loop {
         let mut after = at + 1;
         let step = light_step::<true, MORE>(
@@ -20506,9 +20695,65 @@ fn stretch<const MORE: bool>(
         at = after;
     }
     stack.finish();
+    masks.keep(frame, &lazy);
     *pc = at;
     *ran = count;
     code[at]
+}
+
+/// The operator masks a [`stretch`] worked out — [`native_ops`] for
+/// `Integer` and for `Float` — kept for the next stretch of a frame with
+/// the same lexical scope and body, which is what [`run_calls`] runs at
+/// every call and every return: `fib` asked `native_ops` twice a call,
+/// one stretch in the callee and one in the caller after it returns (#746).
+///
+/// Those two are all a mask depends on besides the operators the program
+/// has defined: whether a refinement is active in the scope, and whether
+/// the body is the core library's. Nothing `run_calls` runs can change
+/// either or define a method — a light instruction, a call its fast paths
+/// take and the return from one, a primitive's light form — and no other
+/// Ractor writes the class tables until this one's next safe point, which
+/// is outside it, in `run`. So a mask kept here answers as `native_ops`
+/// would, for as long as one `run_calls` lasts; it is never kept longer.
+#[derive(Clone, Copy)]
+struct Masks {
+    /// The scope and the body's cache base the masks were worked out for.
+    key: Option<(CrefId, u32)>,
+    ops: Option<u32>,
+    float_ops: Option<u32>,
+}
+
+impl Masks {
+    /// Nothing kept: what a stretch run alone starts and ends with.
+    const NONE: Masks = Masks {
+        key: None,
+        ops: None,
+        float_ops: None,
+    };
+
+    /// A [`Lazy`] for a stretch of `frame`, holding what was kept for it.
+    #[inline(always)]
+    fn seed(&self, frame: &Call) -> Lazy {
+        if self.key == Some((frame.cref, frame.cache_base)) {
+            Lazy {
+                ops: self.ops,
+                float_ops: self.float_ops,
+                view: None,
+            }
+        } else {
+            Lazy::default()
+        }
+    }
+
+    /// Keep what a stretch of `frame` worked out, for the next one.
+    #[inline(always)]
+    fn keep(&mut self, frame: &Call, lazy: &Lazy) {
+        *self = Masks {
+            key: Some((frame.cref, frame.cache_base)),
+            ops: lazy.ops,
+            float_ops: lazy.float_ops,
+        };
+    }
 }
 
 /// Whether `insn` is a call [`run_calls`] may take, as far as its site's
@@ -20584,6 +20829,7 @@ fn run_calls(
         // Entered at the call a stretch stopped at.
         stretch_first: false,
         root_limit: calls.root_limit,
+        masks: Masks::NONE,
     };
     // Each flavour of the loop runs until a frame of the other flavour is
     // reached, and hands over to it there.
@@ -20628,6 +20874,9 @@ struct CallsState {
     stretch_first: bool,
     /// See [`LightCalls::root_limit`].
     root_limit: usize,
+    /// What the stretches have worked out about the operators, for the
+    /// next one: see [`Masks`].
+    masks: Masks,
 }
 
 /// [`run_calls`]'s loop for frames whose stretches run in `more_stretch`'s
@@ -20652,9 +20901,18 @@ fn calls_loop<const MORE: bool>(
     let mut at = state.at;
     let room = state.room;
     let mut ran = state.ran;
+    let mut masks = state.masks;
     let mut insn = if std::mem::take(&mut state.stretch_first) {
         let top = frames.len() - 1;
-        stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room)
+        stretch::<MORE>(
+            scope,
+            stack,
+            &frames[top],
+            &mut at,
+            &mut ran,
+            room,
+            &mut masks,
+        )
     } else {
         // The instruction at `at`: read here once, and then answered by
         // each stretch, which has it in hand.
@@ -20666,114 +20924,115 @@ fn calls_loop<const MORE: bool>(
         }
         let top = frames.len() - 1;
         let frame = &frames[top];
-        match insn {
-            Insn::Send(index) | Insn::Yield(index) => {
-                // A primitive's light form, if it needs no allocation: the
-                // call is answered where it stands, with no frame and no
-                // handle kept, and the stretch goes on in this frame.
-                if let Insn::Send(index) = insn
-                    && matches!(
-                        scope.call_caches().plan(frame.cache_base + index),
-                        Plan::Native(_)
-                    )
-                {
-                    let Some(next) =
-                        native_calls(scope, stack, frame, index, &mut at, &mut ran, room)
-                    else {
-                        // Tried again only when the entry for the receiver's
-                        // class comes in front, which it does once.
-                        if promote_site(scope, stack, &frames[top], index) {
-                            continue;
-                        }
-                        state.declined = true;
-                        break false;
-                    };
-                    insn = next;
-                    continue;
-                }
-                if scope.rooted() > state.root_limit {
-                    break false;
-                }
-                let pushed = if matches!(insn, Insn::Send(_)) {
-                    send_simple(scope, stack, frames, index, ids)
-                } else {
-                    yield_simple(scope, stack, frames, index, ids)
-                };
-                let Some(receiver) = pushed else {
-                    if let Insn::Send(index) = insn
-                        && retries_promoted(scope, stack, &frames[top], index)
-                    {
+        // The call and the return a stretch stops at most often, each told
+        // by one compare, ahead of the jump table the other arms take (#746).
+        if let Insn::Send(index) | Insn::Yield(index) = insn {
+            // A primitive's light form, if it needs no allocation: the
+            // call is answered where it stands, with no frame and no
+            // handle kept, and the stretch goes on in this frame.
+            if let Insn::Send(index) = insn
+                && matches!(
+                    scope.call_caches().plan(frame.cache_base + index),
+                    Plan::Native(_)
+                )
+            {
+                let Some(next) = native_calls(scope, stack, frame, index, &mut at, &mut ran, room)
+                else {
+                    // Tried again only when the entry for the receiver's
+                    // class comes in front, which it does once.
+                    if promote_site(scope, stack, &frames[top], index) {
                         continue;
                     }
                     state.declined = true;
                     break false;
                 };
-                // The receiver has moved off the stack into the frame, so it
-                // takes a handle, as the loop's rooting of what is fresh on
-                // the stack would have given it before the send — unless it
-                // is the caller's own `self`, which every frame's receiver
-                // is rooted as already, from its push or the last
-                // `release_roots` (#746). Everything else the call took is
-                // still on the stack, as the callee's locals, for the next
-                // such rooting; nothing between here and it can collect.
-                if !receiver.is_immediate() && receiver != frames[top].receiver {
-                    scope.root(receiver);
+                insn = next;
+                continue;
+            }
+            if scope.rooted() > state.root_limit {
+                break false;
+            }
+            let pushed = if matches!(insn, Insn::Send(_)) {
+                send_simple(scope, stack, frames, index, ids)
+            } else {
+                yield_simple(scope, stack, frames, index, ids)
+            };
+            let Some(receiver) = pushed else {
+                if let Insn::Send(index) = insn
+                    && retries_promoted(scope, stack, &frames[top], index)
+                {
+                    continue;
                 }
-                // Where the caller resumes, and what a backtrace taken in the
-                // callee reads for the caller's line.
-                frames[top].pc = at + 1;
-                state.entered += 1;
-                at = 0;
+                state.declined = true;
+                break false;
+            };
+            // The receiver has moved off the stack into the frame, so it
+            // takes a handle, as the loop's rooting of what is fresh on
+            // the stack would have given it before the send — unless it
+            // is the caller's own `self`, which every frame's receiver
+            // is rooted as already, from its push or the last
+            // `release_roots` (#746). Everything else the call took is
+            // still on the stack, as the callee's locals, for the next
+            // such rooting; nothing between here and it can collect.
+            if !receiver.is_immediate() && receiver != frames[top].receiver {
+                scope.root(receiver);
             }
-            // `run`'s own arms for these, under its conditions.
-            Insn::Leave if top > 0 && !frame.raises_receiver => {
-                leave_in_place(scope, stack, frames, true);
-                state.left |= state.entered == 0;
-                state.entered = state.entered.saturating_sub(1);
-                at = frames.last().expect("the caller").pc;
-            }
-            Insn::Return if top > 0 && returns_in_place(frame, at + 1) => {
-                leave_in_place(scope, stack, frames, false);
-                state.left |= state.entered == 0;
-                state.entered = state.entered.saturating_sub(1);
-                at = frames.last().expect("the caller").pc;
-            }
-            // A symbol literal: an immediate, as `run`'s arm pushes it.
-            Insn::PushSym(index) => {
-                stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
-                at += 1;
-            }
-            // What `run` answers before its closure through `light_more`,
-            // as it answers it; a value it stores may be one a stretch left
-            // on the stack unrooted, so what is fresh is rooted first.
-            Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..)
-                if scope.rooted() + stack.len() <= state.root_limit =>
-            {
-                if !calls_more(scope, stack, frame, insn) {
-                    break false;
+            // Where the caller resumes, and what a backtrace taken in the
+            // callee reads for the caller's line.
+            frames[top].pc = at + 1;
+            state.entered += 1;
+            at = 0;
+        } else if matches!(insn, Insn::Return) && top > 0 && returns_in_place(frame, at + 1) {
+            leave_here(scope, stack, frames, false);
+            state.left |= state.entered == 0;
+            state.entered = state.entered.saturating_sub(1);
+            at = frames.last().expect("the caller").pc;
+        } else {
+            match insn {
+                // `run`'s own arms for these, under its conditions.
+                Insn::Leave if top > 0 && !frame.raises_receiver => {
+                    leave_here(scope, stack, frames, true);
+                    state.left |= state.entered == 0;
+                    state.entered = state.entered.saturating_sub(1);
+                    at = frames.last().expect("the caller").pc;
                 }
-                at += 1;
-            }
-            // A local set to a heap value, which a light stretch leaves for
-            // the loop to root first.
-            Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= state.root_limit => {
-                calls_set_local(scope, stack, frame, slot, depth);
-                at += 1;
-            }
-            // An Array literal, `[left, right]`: answered here rather than by
-            // the trip back to `run` an allocation would otherwise take, once
-            // what is fresh on the stack is rooted, as `run` roots it at the
-            // top of its loop. A collection it starts may queue finalizers,
-            // which `run` runs at its next call or return, so the calls stop
-            // here for it then.
-            Insn::NewArray(count) if scope.rooted() + stack.len() <= state.root_limit => {
-                calls_new_array(scope, stack, count as usize);
-                at += 1;
-                if scope.has_pending_finalizers() {
-                    break false;
+                // A symbol literal: an immediate, as `run`'s arm pushes it.
+                Insn::PushSym(index) => {
+                    stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
+                    at += 1;
                 }
+                // What `run` answers before its closure through `light_more`,
+                // as it answers it; a value it stores may be one a stretch left
+                // on the stack unrooted, so what is fresh is rooted first.
+                Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..)
+                    if scope.rooted() + stack.len() <= state.root_limit =>
+                {
+                    if !calls_more(scope, stack, frame, insn) {
+                        break false;
+                    }
+                    at += 1;
+                }
+                // A local set to a heap value, which a light stretch leaves for
+                // the loop to root first.
+                Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= state.root_limit => {
+                    calls_set_local(scope, stack, frame, slot, depth);
+                    at += 1;
+                }
+                // An Array literal, `[left, right]`: answered here rather than by
+                // the trip back to `run` an allocation would otherwise take, once
+                // what is fresh on the stack is rooted, as `run` roots it at the
+                // top of its loop. A collection it starts may queue finalizers,
+                // which `run` runs at its next call or return, so the calls stop
+                // here for it then.
+                Insn::NewArray(count) if scope.rooted() + stack.len() <= state.root_limit => {
+                    calls_new_array(scope, stack, count as usize);
+                    at += 1;
+                    if scope.has_pending_finalizers() {
+                        break false;
+                    }
+                }
+                _ => break false,
             }
-            _ => break false,
         }
         ran += 1;
         let top = frames.len() - 1;
@@ -20784,10 +21043,19 @@ fn calls_loop<const MORE: bool>(
             state.stretch_first = true;
             break true;
         }
-        insn = stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room);
+        insn = stretch::<MORE>(
+            scope,
+            stack,
+            &frames[top],
+            &mut at,
+            &mut ran,
+            room,
+            &mut masks,
+        );
     };
     state.at = at;
     state.ran = ran;
+    state.masks = masks;
     switched
 }
 
