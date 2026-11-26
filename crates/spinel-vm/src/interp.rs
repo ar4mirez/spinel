@@ -20744,7 +20744,7 @@ fn light_stretch(
     let room = *budget - limit;
     let mut ran = 0;
     let mut masks = Masks::NONE;
-    stretch::<false>(scope, stack, frame, pc, &mut ran, room, &mut masks);
+    stretch::<false, true>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20771,7 +20771,7 @@ fn more_stretch(
     let room = *budget - limit;
     let mut ran = 0;
     let mut masks = Masks::NONE;
-    stretch::<true>(scope, stack, frame, pc, &mut ran, room, &mut masks);
+    stretch::<true, false>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20963,8 +20963,17 @@ fn native_run<const MORE: bool, const KEPT: bool>(
 /// `masks` carries the operator masks from one stretch to the next: see
 /// [`Masks`]. A caller that runs one stretch alone hands it
 /// [`Masks::NONE`], and the compiler drops what it would have kept.
+///
+/// `COPIED` is whether each instruction is copied out of the body before
+/// its arm runs, every field read ahead of the jump table, rather than
+/// matched where it stands. [`light_stretch`]'s loop wants the copy:
+/// matched in place there, it ran out of registers and kept the body's
+/// address on the stack, a load on the path of every dispatch, `getivar`
+/// 20% more cycles in fewer instructions. The other loops, `calls_loop`'s
+/// and `more_stretch`'s, keep it in a register either way and match in
+/// place, which reads only the arm's own fields (#746).
 #[inline(always)]
-fn stretch<const MORE: bool>(
+fn stretch<const MORE: bool, const COPIED: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -20982,12 +20991,19 @@ fn stretch<const MORE: bool>(
     let mut lazy = masks.seed(frame);
     loop {
         let mut after = at + 1;
+        let copy;
+        let insn = if COPIED {
+            copy = code[at];
+            &copy
+        } else {
+            &code[at]
+        };
         let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
             code,
-            &code[at],
+            insn,
             &mut after,
             &mut lazy,
             true,
@@ -21233,7 +21249,7 @@ fn calls_loop<const MORE: bool>(
                 state.root_limit,
             )
         } else {
-            stretch::<MORE>(
+            stretch::<MORE, false>(
                 scope,
                 stack,
                 &frames[top],
@@ -21414,7 +21430,7 @@ fn calls_loop<const MORE: bool>(
                 state.root_limit,
             )
         } else {
-            stretch::<MORE>(
+            stretch::<MORE, false>(
                 scope,
                 stack,
                 &frames[top],
