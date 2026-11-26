@@ -383,8 +383,29 @@ pub enum ParseFailure {
     Unsupported,
 }
 
-/// How many class objects [`Heap`] remembers the ids of.
+/// How many class objects [`Heap`] remembers the ids of, in sets of two.
 const CLASS_IDS: usize = 64;
+
+/// The first of the two entries of [`Heap`]'s `class_ids` the class object
+/// at `address` is remembered in, the other being the one after it.
+///
+/// Two ways rather than one, and the set picked by every bit of the address
+/// rather than by `(address >> 4) % CLASS_IDS` (#751). A class object is a
+/// cell of 128 or 256 bytes, so the bits just above sixteen bytes take only
+/// 8 or 4 values within a block, and which two classes landed on one entry
+/// was settled by everything allocated before boot — the program's path and
+/// source among it. Two that a loop alternates between then evicted each
+/// other at every turn, each time reading the class's `@__id__` again:
+/// `Thread` and `Fiber` in `Mutex#lock` (#765), or a program's `main` and
+/// `Array` in yjit-bench `binarytrees`, which sent a call from every tree
+/// node down the general path. The multiply is FxHash's, and its top bits
+/// depend on every bit of the address.
+#[inline(always)]
+fn class_ids_set(address: usize) -> usize {
+    const SETS: usize = CLASS_IDS / 2;
+    let mixed = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    (mixed >> (64 - SETS.trailing_zeros())) as usize * 2
+}
 
 pub struct Heap {
     /// Whether any module holds an autoload entry (#709): the one test a
@@ -431,8 +452,9 @@ pub struct Heap {
     /// source: an entry is two integers and a `Method`, whose body is a
     /// fixnum definition id the collector never traces.
     call_caches: crate::callcache::CallCaches,
-    /// Which class each recently asked-about class object is, direct-mapped
-    /// by address: `class_of` otherwise reads the class's `@__id__` through
+    /// Which class each recently asked-about class object is, two entries to
+    /// a set picked by its address (see [`class_ids_set`]): `class_of`
+    /// otherwise reads the class's `@__id__` through
     /// its shape on every dispatch. Emptied by every collection, since a
     /// freed class's address can be another's afterwards, and checked
     /// against the class table on every hit.
@@ -1423,10 +1445,58 @@ impl Heap {
     /// Answers whether the payload came zeroed.
     #[inline(always)]
     fn allocate_header(&mut self, class: Option<Value>, payload: Payload, len: u32) -> (Obj, bool) {
-        let size = Heap::object_size(payload, len);
         if !self.gc_disabled && (self.gc_stress || self.bytes_since_gc >= self.next_gc) {
             self.collect();
         }
+        self.take_cell(class, payload, len)
+    }
+
+    /// [`Heap::allocate_slots`] of a classless object of `len` slots holding
+    /// `values` and then `nil`, and an object of `class` whose first slot
+    /// holds it and whose other slots hold `rest`: an object and the storage
+    /// it keeps its elements in, an `Array`'s two cells. The threshold is
+    /// checked once, before either, so nothing collects between the two and
+    /// the storage needs no handle while the second is made; a collection
+    /// the second would have started comes at the next allocation instead.
+    /// Every heap object among `values` and `rest` must survive the
+    /// collection this may start, as for any allocation, and `class` is a
+    /// class object, which the heap's own table keeps.
+    fn allocate_with_storage(
+        &mut self,
+        class: Value,
+        rest: &[Value],
+        values: &[Value],
+        len: u32,
+    ) -> Value {
+        debug_assert!(values.len() <= len as usize, "more values than slots");
+        if !self.gc_disabled && (self.gc_stress || self.bytes_since_gc >= self.next_gc) {
+            self.collect();
+        }
+        let (storage, _) = self.take_cell(None, Payload::Slots, len);
+        let outer = u32::try_from(rest.len() + 1).expect("a handful of slots");
+        let (object, _) = self.take_cell(Some(class), Payload::Slots, outer);
+        // SAFETY: `take_cell` made `len` slots after the storage's header and
+        // `rest.len() + 1` after the object's, in cells nothing else can reach
+        // yet; `values` and `rest` live outside the heap, and there are no
+        // more of them than slots.
+        unsafe {
+            let slots = storage.slots();
+            ptr::copy_nonoverlapping(values.as_ptr(), slots, values.len());
+            for i in values.len()..len as usize {
+                ptr::write(slots.add(i), Value::NIL);
+            }
+            let slots = object.slots();
+            ptr::write(slots, Value::heap(storage.0.cast()));
+            ptr::copy_nonoverlapping(rest.as_ptr(), slots.add(1), rest.len());
+        }
+        Value::heap(object.0.cast())
+    }
+
+    /// The rest of [`Heap::allocate_header`], once it has collected if it
+    /// was going to: take a cell and write its header.
+    #[inline(always)]
+    fn take_cell(&mut self, class: Option<Value>, payload: Payload, len: u32) -> (Obj, bool) {
+        let size = Heap::object_size(payload, len);
         self.bytes_since_gc += size;
         self.total_allocated += 1;
 
@@ -1935,6 +2005,33 @@ impl<'h> HandleScope<'h> {
         let class = class.map(|handle| self.get(handle));
         let value = self.heap.allocate_slots(class, values, len);
         for &slot in values {
+            self.storable(slot);
+        }
+        self.root(value)
+    }
+
+    /// An object of class `class` whose first slot is a fresh classless
+    /// object of `len` slots holding `values` and then `nil`, and whose other
+    /// slots hold `rest`, rooted in this scope: an `Array` and its storage,
+    /// made as [`Heap::allocate_with_storage`] makes them, under one handle,
+    /// the object's, which keeps the storage too. The class is read from
+    /// this heap's table of class objects, which roots every one, so it
+    /// needs no handle.
+    ///
+    /// The allocation can collect before either cell is made, so every heap
+    /// object among `values` and `rest` must be rooted, as for
+    /// [`HandleScope::alloc_slots`].
+    pub(crate) fn alloc_with_storage(
+        &mut self,
+        class: crate::class::ClassId,
+        rest: &[Value],
+        values: &[Value],
+        len: u32,
+    ) -> Handle<'h> {
+        assert!(values.len() <= len as usize, "more values than slots");
+        let class = self.heap.class_object(class);
+        let value = self.heap.allocate_with_storage(class, rest, values, len);
+        for &slot in values.iter().chain(rest) {
             self.storable(slot);
         }
         self.root(value)
@@ -2734,9 +2831,14 @@ impl<'h> HandleScope<'h> {
     }
 
     /// The class id remembered for the class object at `address`, if any.
+    #[inline]
     pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
-        let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
-        (at == address).then_some(id)
+        let set = class_ids_set(address);
+        let ids = &self.heap.class_ids;
+        if ids[set].0 == address {
+            return Some(ids[set].1);
+        }
+        (ids[set + 1].0 == address).then_some(ids[set + 1].1)
     }
 
     /// The id of the class or module `value` is the object of, when it is
@@ -2749,8 +2851,17 @@ impl<'h> HandleScope<'h> {
         (self.heap.class_objects.get(id.index()) == Some(&value)).then_some(id)
     }
 
+    /// Remember `id` for the class object at `address`, in the first entry
+    /// of its set, the one it displaces moving to the second: of two
+    /// classes on one set, both are kept, and of three the one remembered
+    /// longest ago goes.
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
-        self.heap.class_ids[(address >> 4) % CLASS_IDS] = (address, id);
+        let set = class_ids_set(address);
+        let ids = &mut self.heap.class_ids;
+        if ids[set].0 != address {
+            ids[set + 1] = ids[set];
+        }
+        ids[set] = (address, id);
     }
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
@@ -4044,6 +4155,77 @@ mod tests {
         scope.mark_keywords(handle);
         assert!(scope.is_keywords_of(object));
         assert!(!scope.is_keywords_of(Value::fixnum(1).unwrap()));
+    }
+
+    /// Two class objects on one set of the remembered class ids are both
+    /// kept, so a loop alternating between them does not evict one at every
+    /// turn; a third on the set displaces the one remembered longest ago,
+    /// and remembering one again moves it in front (#751).
+    #[test]
+    fn two_classes_on_one_set_of_remembered_ids_are_both_kept() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        // Cell-aligned addresses on one set; never dereferenced.
+        let first = 0x7f00_0000_0100_usize;
+        let set = class_ids_set(first);
+        let mut on_set = (1..)
+            .map(|n| first + n * 128)
+            .filter(|&a| class_ids_set(a) == set);
+        let (second, third) = (on_set.next().unwrap(), on_set.next().unwrap());
+        assert_eq!(set % 2, 0, "a set starts at an even entry");
+        scope.remember_class_id(first, 1);
+        scope.remember_class_id(second, 2);
+        assert_eq!(scope.remembered_class_id(first), Some(1));
+        assert_eq!(scope.remembered_class_id(second), Some(2));
+        scope.remember_class_id(third, 3);
+        assert_eq!(scope.remembered_class_id(first), None, "the oldest goes");
+        assert_eq!(scope.remembered_class_id(second), Some(2));
+        assert_eq!(scope.remembered_class_id(third), Some(3));
+        scope.remember_class_id(second, 4);
+        scope.remember_class_id(first, 1);
+        assert_eq!(scope.remembered_class_id(second), Some(4));
+        assert_eq!(scope.remembered_class_id(first), Some(1));
+        assert_eq!(scope.remembered_class_id(third), None);
+        // A collection forgets them all.
+        scope.collect();
+        assert_eq!(scope.remembered_class_id(first), None);
+        assert_eq!(scope.remembered_class_id(second), None);
+    }
+
+    /// An object and its storage made together hold what they were given
+    /// through collections, under the one handle the object has: the storage
+    /// is kept by the object's first slot, with no handle of its own, and the
+    /// class needs none either (#751).
+    #[test]
+    fn alloc_with_storage_keeps_both_cells_under_one_handle() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let class = crate::class::Builtin::Array.id();
+        let element = scope.alloc(None, Payload::Bytes, 3);
+        let values = [scope.get(element), Value::fixnum(7).unwrap()];
+        let length = Value::fixnum(2).unwrap();
+        scope.set_gc_stress(true);
+        let exact = scope.alloc_with_storage(class, &[length], &values, 2);
+        let padded = scope.alloc_with_storage(class, &[length], &values, 4);
+        scope.set_gc_stress(false);
+        scope.collect();
+        let class_object = scope.class_object(class);
+        for (object, room) in [(exact, 2), (padded, 4)] {
+            let object = scope.get(object);
+            assert_eq!(scope.class_object_of(object), Some(class_object));
+            let [storage, held] = scope.slots_of::<2>(object).expect("two slots");
+            assert_eq!(held, length);
+            assert_eq!(
+                scope.class_object_of(storage),
+                None,
+                "the storage has no class"
+            );
+            let mut want = vec![Value::NIL; room];
+            want[..2].copy_from_slice(&values);
+            assert_eq!(scope.slice_of(storage), Some(&want[..]));
+        }
+        assert_eq!(scope.bytes_of(values[0]), Some(&[0, 0, 0][..]));
     }
 
     /// An object's size counts the classless storage it owns and not the

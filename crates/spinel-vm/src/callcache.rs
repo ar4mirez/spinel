@@ -300,15 +300,19 @@ pub struct CallCaches {
     /// How the call each entry answers binds, indexed as `entries` is.
     plans: Vec<Plan>,
     /// What a call site held for the receiver class before its entry's, for
-    /// the sites that have seen a second class, by slot. See
-    /// [`CallCaches::promote`]. A map rather than a run beside `entries`:
-    /// most sites never see a second class, and an entry with its plan is
-    /// a hundred bytes or so, which every slot of every body entered would
-    /// otherwise pay.
-    behind: HashMap<u32, Behind>,
-    /// Whether `behind` holds an entry for the slot, indexed as `entries`
-    /// is: the one load [`CallCaches::has_behind`] answers from.
-    held_behind: Vec<bool>,
+    /// the sites that have seen a second class, in the order they first did.
+    /// See [`CallCaches::promote`]. Not a run beside `entries`: most sites
+    /// never see a second class, and an entry with its plan is a hundred
+    /// bytes or so, which every slot of every body entered would otherwise
+    /// pay.
+    behind: Vec<Behind>,
+    /// Where in `behind` the slot's is, plus one, and 0 for a slot with
+    /// nothing behind its entry, indexed as `entries` is: the one load
+    /// [`CallCaches::has_behind`] answers from, and the index `promote`
+    /// reads by. An index rather than a map keyed by slot, which hashed the
+    /// slot at every swap: a site that sees two classes in turn — `left.nil?`
+    /// over a tree of Arrays and `nil`s — swaps at nearly every call (#751).
+    behind_at: Vec<u32>,
     /// The instance-variable sites' caches, indexed as `entries` is: an
     /// `Iseq`'s run there is its call sites and then its
     /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
@@ -360,8 +364,8 @@ impl Default for CallCaches {
         CallCaches {
             entries: Vec::new(),
             plans: Vec::new(),
-            behind: HashMap::new(),
-            held_behind: Vec::new(),
+            behind: Vec::new(),
+            behind_at: Vec::new(),
             ivars: Vec::new(),
             consts: Vec::new(),
             more: Vec::new(),
@@ -423,7 +427,7 @@ impl CallCaches {
             (iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize).max(1);
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
-        self.held_behind.resize(self.entries.len(), false);
+        self.behind_at.resize(self.entries.len(), 0);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.consts.resize(self.entries.len(), None);
         self.more.resize(self.entries.len(), false);
@@ -477,15 +481,19 @@ impl CallCaches {
         });
         match std::mem::replace(&mut self.entries[slot], fresh) {
             Some(old) if old.class != class => {
-                self.behind.insert(
-                    slot as u32,
-                    Behind {
-                        entry: Some(old),
-                        plan: std::mem::take(&mut self.plans[slot]),
-                        ivar: self.ivars[slot],
-                    },
-                );
-                self.held_behind[slot] = true;
+                let behind = Behind {
+                    entry: Some(old),
+                    plan: std::mem::take(&mut self.plans[slot]),
+                    ivar: self.ivars[slot],
+                };
+                match self.behind_at[slot] {
+                    0 => {
+                        self.behind.push(behind);
+                        self.behind_at[slot] =
+                            u32::try_from(self.behind.len()).expect("a heap under 2^32 call sites");
+                    }
+                    at => self.behind[at as usize - 1] = behind,
+                }
             }
             _ => self.plans[slot] = Plan::Unknown,
         }
@@ -502,7 +510,7 @@ impl CallCaches {
     #[inline]
     #[must_use]
     pub fn has_behind(&self, slot: u32) -> bool {
-        self.held_behind[slot as usize]
+        self.behind_at[slot as usize] != 0
     }
 
     /// Bring what `slot` held for `class` back in front, when that is what
@@ -519,13 +527,11 @@ impl CallCaches {
     ///
     /// As [`CallCaches::get`].
     pub fn promote(&mut self, slot: u32, class: ClassId, serial: u64) -> bool {
-        if !self.held_behind[slot as usize] {
-            return false;
-        }
-        let Some(behind) = self.behind.get_mut(&slot) else {
+        let slot = slot as usize;
+        let Some(at) = self.behind_at[slot].checked_sub(1) else {
             return false;
         };
-        let slot = slot as usize;
+        let behind = &mut self.behind[at as usize];
         match behind.entry {
             Some(entry) if entry.class == class && entry.serial == serial => {}
             _ => return false,
@@ -1009,6 +1015,31 @@ mod tests {
         caches.fill(base, e, serial(&scope, e), from_e);
         assert!(caches.promote(base, d, serial(&scope, d)));
         assert!(!caches.promote(base, c, serial(&scope, c)));
+
+        // Each site keeps its own entry behind, wherever in the table its
+        // slot is and in whatever order the sites first saw a second class:
+        // the second and the third of three sites here, the third first.
+        let run = caches.base(&iseq_with(3));
+        assert!(!caches.has_behind(run) && !caches.has_behind(run + 2));
+        caches.fill(run + 2, d, serial(&scope, d), from_d);
+        caches.fill(run + 2, e, serial(&scope, e), from_e);
+        caches.fill(run + 1, c, serial(&scope, c), from_c);
+        caches.fill(run + 1, d, serial(&scope, d), from_d);
+        assert!(!caches.has_behind(run));
+        assert!(caches.has_behind(run + 1) && caches.has_behind(run + 2));
+        assert!(!caches.promote(run, d, serial(&scope, d)), "nothing behind");
+        assert!(caches.promote(run + 2, d, serial(&scope, d)));
+        assert!(caches.promote(run + 1, c, serial(&scope, c)));
+        assert_eq!(caches.get(run + 2, d, serial(&scope, d)).unwrap().owner, d);
+        assert_eq!(caches.get(run + 1, c, serial(&scope, c)).unwrap().owner, c);
+        assert!(
+            caches.promote(run + 2, e, serial(&scope, e)),
+            "`E` behind `D`"
+        );
+        assert!(
+            caches.promote(run + 1, d, serial(&scope, d)),
+            "`D` behind `C`"
+        );
     }
 
     /// Narrowing a method's visibility must invalidate a warm site (#161).
