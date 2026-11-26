@@ -17776,7 +17776,7 @@ fn relambda<'h>(
 /// methods that make a `Proc` callable. Everything else is `core/*.rb` and
 /// [#15](https://github.com/ar4mirez/spinel/issues/15).
 pub fn install_primitives(scope: &mut HandleScope<'_>) {
-    let table: &[(Builtin, &[&str], Native)] = &[
+    const TABLE: &[(Builtin, &[&str], Native)] = &[
         (
             Builtin::Proc,
             &["call", "()", "[]", "yield", "==="],
@@ -19777,42 +19777,98 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::String, &["byteslice"], Native::StringByteSlice),
         (Builtin::String, &["<=>"], Native::StringCompare),
     ];
+    // The operators below, and the module functions after them, by name.
+    const OPERATORS: [BinOp; 9] = [
+        BinOp::Add,
+        BinOp::Sub,
+        BinOp::Mul,
+        BinOp::Div,
+        BinOp::Mod,
+        BinOp::Lt,
+        BinOp::Le,
+        BinOp::Gt,
+        BinOp::Ge,
+    ];
+    const MODULE_FUNCTIONS: [&str; 7] = [
+        "block_given?",
+        "catch",
+        "fail",
+        "lambda",
+        "proc",
+        "raise",
+        "throw",
+    ];
+
+    // The same in every heap, so built once per process and copied in (#652).
+    // Built in the order the definitions used to intern their names, so each
+    // name has the id it always had.
+    let primitives = crate::shared::primitives::get_or_build(|| {
+        let mut natives = Vec::with_capacity(TABLE.len());
+        let mut methods: Vec<(ClassId, crate::value::SymbolMap<_>)> = Vec::new();
+        for (row, (builtin, names, native)) in TABLE.iter().enumerate() {
+            natives.push(*native);
+            let body = Value::fixnum(row as i64).expect("a definition id fits a fixnum");
+            let class = builtin.id();
+            let at = match methods.iter().position(|&(id, _)| id == class) {
+                Some(at) => at,
+                None => {
+                    methods.push((class, crate::value::SymbolMap::default()));
+                    methods.len() - 1
+                }
+            };
+            for name in *names {
+                let symbol = crate::shared::symbols::intern(name);
+                methods[at]
+                    .1
+                    .insert(symbol, crate::class::top_level_entry(symbol, body));
+            }
+        }
+        let mut operators: Vec<SymbolId> = OPERATORS
+            .iter()
+            .map(|op| crate::shared::symbols::intern(op.name()))
+            .collect();
+        operators.extend(["==", "===", "-@"].map(crate::shared::symbols::intern));
+        crate::shared::primitives::Primitives {
+            natives,
+            methods,
+            operators,
+            module_functions: MODULE_FUNCTIONS
+                .map(crate::shared::symbols::intern)
+                .to_vec(),
+        }
+    });
+
     // Nothing is looked up until the module functions below, so the walks
     // every definition here would start are held and done once per class.
     scope.classes_mut().defer_invalidation();
-    for (builtin, names, native) in table {
-        let body = scope.definitions_mut().add(Definition::Native(*native));
-        for name in *names {
-            let symbol = crate::shared::symbols::intern(name);
-            scope
-                .classes_mut()
-                .define_method(builtin.id(), symbol, body);
-        }
+    // Row `i`'s body is definition `i`, which is what the tables say.
+    assert_eq!(
+        scope.definitions().len(),
+        0,
+        "the primitives are a heap's first definitions"
+    );
+    for &native in &primitives.natives {
+        scope.definitions_mut().add(Definition::Native(native));
+    }
+    for (class, methods) in &primitives.methods {
+        scope.classes_mut().install_methods(*class, methods);
     }
 
     // The operators as methods (#239). `Insn::BinOp` and `Insn::Neg` answer a
     // pair of numbers without dispatching; these are the same functions under
     // the names a `send`, a `respond_to?` or an `inject(:+)` looks up. Sealed,
     // so the instructions can tell when a program has put something else there.
+    let [.., eq, case_eq, neg] = primitives.operators[..] else {
+        unreachable!("the operators end with `==`, `===` and `-@`")
+    };
     for (which, class) in [Builtin::Integer.id(), Builtin::Float.id()]
         .into_iter()
         .enumerate()
     {
-        for op in [
-            BinOp::Add,
-            BinOp::Sub,
-            BinOp::Mul,
-            BinOp::Div,
-            BinOp::Mod,
-            BinOp::Lt,
-            BinOp::Le,
-            BinOp::Gt,
-            BinOp::Ge,
-        ] {
+        for (op, &symbol) in OPERATORS.into_iter().zip(&primitives.operators) {
             let body = scope
                 .definitions_mut()
                 .add(Definition::Native(Native::NumOp(op)));
-            let symbol = crate::shared::symbols::intern(op.name());
             scope.classes_mut().define_method(class, symbol, body);
             scope
                 .classes_mut()
@@ -19824,22 +19880,19 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         let body = scope
             .definitions_mut()
             .add(Definition::Native(Native::NumOp(BinOp::Eq)));
-        for name in ["==", "==="] {
-            let symbol = crate::shared::symbols::intern(name);
+        for symbol in [eq, case_eq] {
             scope.classes_mut().define_method(class, symbol, body);
         }
-        let symbol = crate::shared::symbols::intern("==");
         scope
             .classes_mut()
-            .seal_operator(which, class, BinOp::Eq as usize, symbol, body);
+            .seal_operator(which, class, BinOp::Eq as usize, eq, body);
         let body = scope
             .definitions_mut()
             .add(Definition::Native(Native::NumNeg));
-        let symbol = crate::shared::symbols::intern("-@");
-        scope.classes_mut().define_method(class, symbol, body);
+        scope.classes_mut().define_method(class, neg, body);
         scope
             .classes_mut()
-            .seal_operator(which, class, NEG_GUARD, symbol, body);
+            .seal_operator(which, class, NEG_GUARD, neg, body);
     }
 
     scope.classes_mut().flush_invalidation();
@@ -19855,16 +19908,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
     let kernel_object = scope.class_object(kernel);
     let singleton = singleton_of(scope, kernel_object)
         .expect("the Kernel module object takes a singleton class");
-    for name in [
-        "block_given?",
-        "catch",
-        "fail",
-        "lambda",
-        "proc",
-        "raise",
-        "throw",
-    ] {
-        let symbol = crate::shared::symbols::intern(name);
+    for &symbol in &primitives.module_functions {
         // `module_function`, by hand: a public copy on `Kernel`'s singleton and
         // a private instance method. `Kernel.raise` answers and
         // `Object.new.raise` does not, which is the pair `defined?` asks about.
@@ -30253,6 +30297,58 @@ mod tests {
             locals: vec!["slot".into()],
             max_stack,
             ..Iseq::default()
+        }
+    }
+
+    /// The primitives a heap gets from the table built once per process are
+    /// what defining each one would give it (#652): the same body, scope and
+    /// visibility as a `define_method` of it, on the class the list names. Two
+    /// heaps, because the first builds the table and the second only copies
+    /// it; one under Miri, where a bootstrap is most of a minute and copying
+    /// is safe code.
+    #[test]
+    fn every_heap_gets_the_primitives_defining_them_would_give() {
+        for _ in 0..if cfg!(miri) { 1 } else { 2 } {
+            let mut heap = Heap::new();
+            let mut scope = heap.scope();
+            scope.bootstrap();
+            let primitives = crate::shared::primitives::get_or_build(|| {
+                unreachable!("bootstrapping a heap builds the primitives")
+            });
+            let scratch = scope.define_class(None, Some(Builtin::Object.id()));
+            for (class, methods) in &primitives.methods {
+                for (&name, &(body, cref, visibility, origin)) in methods {
+                    let row = usize::try_from(body.as_fixnum().expect("a definition id"))
+                        .expect("a definition id is not negative");
+                    assert!(matches!(
+                        scope.definitions().get(body),
+                        Some(&Definition::Native(native)) if native == primitives.natives[row]
+                    ));
+                    scope.classes_mut().define_method(scratch, name, body);
+                    let defined = scope.lookup_method(scratch, name).expect("just defined");
+                    assert_eq!(
+                        (
+                            defined.body,
+                            defined.cref,
+                            defined.visibility,
+                            defined.origin
+                        ),
+                        (body, cref, visibility, origin),
+                        "{:?}",
+                        crate::shared::symbols::name(name)
+                    );
+                    let installed = scope.lookup_method(*class, name).expect("installed");
+                    assert_eq!(installed.owner, *class);
+                    // The numeric operators replace some bodies after the
+                    // list, and the module functions are made private.
+                    if installed.body == body && !primitives.module_functions.contains(&name) {
+                        assert_eq!(
+                            (installed.cref, installed.visibility, installed.origin),
+                            (cref, visibility, origin)
+                        );
+                    }
+                }
+            }
         }
     }
 

@@ -4,7 +4,8 @@
 //! thread-locals holding VM objects, because one `Heap` per Ractor is what makes
 //! Ractors parallel. The exception it names is this directory: **immutable,
 //! append-only tables** — symbols, and later frozen string literals — and
-//! values made once and never changed, as the hash seed is.
+//! values made once and never changed, as the hash seed, the compiled core
+//! library and the primitives' method tables are.
 //!
 //! Append-only is what makes them safe to share. An entry is never mutated and
 //! never removed, so an index handed out at any moment stays valid forever and
@@ -26,6 +27,7 @@
 pub mod core_image;
 pub mod env;
 pub mod hash_seed;
+pub mod primitives;
 pub mod services;
 pub mod signals;
 pub mod symbols;
