@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use super::{
     CHILLED, CHILLED_SYMBOL, FROZEN, HandleScope, Heap, KEYWORDS, Obj, Payload, SHAREABLE,
-    SIDE_IVARS,
+    SIDE_IVARS, TMPLOCK,
 };
 use crate::class::{Builtin, ClassId};
 use crate::shape::ShapeId;
@@ -42,6 +42,17 @@ use crate::value::{SymbolId, Value};
 /// The flags a copy keeps. The rest — the mark bit, the side-table bit,
 /// the allocation bit — are the heap's own bookkeeping.
 const COPIED_FLAGS: u8 = FROZEN | CHILLED | CHILLED_SYMBOL | KEYWORDS | SHAREABLE;
+
+/// The [`COPIED_FLAGS`] of `flags`, less a String's [`TMPLOCK`]: a copy is
+/// never locked, as CRuby's copy of a locked String is not.
+const fn copied_flags(flags: u8) -> u8 {
+    let kept = flags & COPIED_FLAGS;
+    if kept & TMPLOCK == TMPLOCK {
+        kept & !TMPLOCK
+    } else {
+        kept
+    }
+}
 
 /// A class whose instances may not be copied, and the exception a copy of
 /// one raises, as CRuby 4.0.9 raises it: `allocator undefined for Proc`, a
@@ -386,10 +397,10 @@ impl Heap {
                             hashes.push(value);
                         }
                     } else {
-                        header.flags = (header.flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
+                        header.flags = super::frozen_flags(header.flags);
                     }
                 } else {
-                    header.flags = (header.flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
+                    header.flags = super::frozen_flags(header.flags);
                 }
             }
             let first = work.len();
@@ -629,7 +640,8 @@ impl Export<'_> {
         };
         Ok(Node {
             class,
-            flags: header.flags & COPIED_FLAGS,
+            // A lock is the original's, held by a block in this heap.
+            flags: copied_flags(header.flags),
             shape,
             side,
             body,
@@ -753,6 +765,6 @@ impl<'h> HandleScope<'h> {
     fn set_copied_flags(&mut self, handle: super::Handle<'h>, flags: u8) {
         let object = self.object(handle);
         // SAFETY: the handle roots a live object of this heap.
-        unsafe { (*object.header()).flags |= flags & COPIED_FLAGS };
+        unsafe { (*object.header()).flags |= copied_flags(flags) };
     }
 }

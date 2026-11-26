@@ -24,15 +24,15 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/env` | 45 | 193 | 193 | 0 | 0 | 0 | 100% |
 | `core/exception` | 39 | 250 | 250 | 0 | 0 | 0 | 100% |
 | `core/false` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
-| `core/fiber` | 15 | 189 | 142 | 0 | 42 | 5 | 75% |
+| `core/fiber` | 15 | 189 | 165 | 0 | 19 | 5 | 87% |
 | `core/file` | 111 | 924 | 924 | 0 | 0 | 0 | 100% |
 | `core/filetest` | 25 | 95 | 95 | 0 | 0 | 0 | 100% |
 | `core/float` | 50 | 261 | 261 | 0 | 0 | 0 | 100% |
 | `core/gc` | 18 | 41 | 41 | 0 | 0 | 0 | 100% |
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
-| `core/io` | 104 | 1650 | 1461 | 0 | 189 | 0 | 89% |
-| `core/kernel` | 118 | 2241 | 2175 | 0 | 43 | 23 | 97% |
+| `core/io` | 104 | 1650 | 1650 | 0 | 0 | 0 | 100% |
+| `core/kernel` | 118 | 2241 | 2178 | 0 | 40 | 23 | 97% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 502 | 502 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 33013 | 30988 | 0 | 1909 | 116 | 94% |
+| **total** | 3841 | 33013 | 31203 | 0 | 1694 | 116 | 95% |

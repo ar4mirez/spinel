@@ -9,6 +9,20 @@ bytecode a tool reads.
 
 ### Added
 
+- **`IO::Buffer` and the Fiber scheduler**
+  ([#797](https://github.com/ar4mirez/spinel/issues/797)). `IO::Buffer`
+  is CRuby 4.0's: internal, mapped (`mmap(2)`, shared across `fork` or
+  private), and String-backed buffers from `for` and `string`, which lock
+  their String while the block runs; slices and their validity, `free`,
+  `resize`, `transfer`, `locked`, typed values, bitwise masks, `hexdump`,
+  and `read`, `write`, `pread` and `pwrite` against an IO. `Fiber.set_scheduler`,
+  `Fiber.schedule`, `Fiber.current_scheduler` and `Fiber.blocking` work, and
+  in a non-blocking fiber `sleep` and an IO's waits, reads and writes go to
+  the scheduler's `kernel_sleep`, `io_wait`, `io_read`, `io_write`,
+  `io_pread` and `io_pwrite`, each IO hook handed an `IO::Buffer`; the
+  scheduler is closed, and so run, when its thread or the program ends.
+  ruby/spec's `core/io` now passes in full.
+
 - **`spinel test DIR` runs the tests and specs under a directory**
   ([#910](https://github.com/ar4mirez/spinel/issues/910)). A directory
   given, with or without a trailing slash, stands for every `*_test.rb` and

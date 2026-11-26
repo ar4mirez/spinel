@@ -100,6 +100,31 @@ const CHILLED: u8 = 0b1000;
 /// words.
 const CHILLED_SYMBOL: u8 = 0b1_0000;
 
+/// A String temporarily locked (#797), CRuby's `STR_TMPLOCK`: an
+/// `IO::Buffer.for` block's String, whose bytes the buffer writes while
+/// every mutator raises "can't modify string; temporarily locked".
+///
+/// Both chilled bits, a pair no chilled String carries, since a String is
+/// unchilled before it is locked, as `rb_str_modify` unchills it first in
+/// CRuby. Every flag bit is taken, and a pair costs no path a new bit would
+/// not: whatever declines a chilled receiver — the light `String#<<`, the
+/// cached instance-variable writes — declines a locked one, and the Ruby
+/// half it falls back to meets the lock in `__unchill__`. [`HandleScope::chilled`]
+/// and [`HandleScope::unchill`] see no chill in the pair, freezing keeps it,
+/// and a copy never carries it.
+pub(crate) const TMPLOCK: u8 = CHILLED | CHILLED_SYMBOL;
+
+/// What freezing leaves of `flags`: frozen, and no longer chilled, though
+/// still [`TMPLOCK`]ed if it was, as CRuby's `rb_obj_freeze` leaves
+/// `STR_TMPLOCK` for `rb_str_unlocktmp` to clear.
+pub(crate) const fn frozen_flags(flags: u8) -> u8 {
+    if flags & TMPLOCK == TMPLOCK {
+        flags | FROZEN
+    } else {
+        (flags | FROZEN) & !TMPLOCK
+    }
+}
+
 /// Set on a `Hash` a `ruby2_keywords` method collected from its caller's
 /// keywords (#200), so that splatting it back out passes them as keywords.
 /// A header bit rather than an ivar because `Hash#inspect` must not show it
@@ -649,6 +674,8 @@ pub struct Heap {
     openssl: crate::openssl::Contexts,
     /// The libyaml emitters `Psych::Emitter`s write with (#108).
     psych: crate::psych::Emitters,
+    /// The memory mapped `IO::Buffer`s read and write (#797).
+    mappings: crate::iobuf::Mappings,
 }
 
 /// Where `ObjectSpace.trace_object_allocations` saw an object allocated
@@ -1043,6 +1070,7 @@ impl Heap {
             ffi: crate::ffi::Ffi::default(),
             openssl: crate::openssl::Contexts::default(),
             psych: crate::psych::Emitters::default(),
+            mappings: crate::iobuf::Mappings::default(),
             any_autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
@@ -1318,6 +1346,11 @@ impl Heap {
     /// The heap's FFI state (#105): see [`crate::ffi`].
     pub fn ffi_mut(&mut self) -> &mut crate::ffi::Ffi {
         &mut self.ffi
+    }
+
+    /// The heap's mapped memory (#797): see [`crate::iobuf`].
+    pub fn mappings_mut(&mut self) -> &mut crate::iobuf::Mappings {
+        &mut self.mappings
     }
 
     /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
@@ -2907,6 +2940,11 @@ impl<'h> HandleScope<'h> {
         self.heap.ffi_mut()
     }
 
+    /// The heap's mapped memory (#797): see [`crate::iobuf`].
+    pub fn mappings_mut(&mut self) -> &mut crate::iobuf::Mappings {
+        self.heap.mappings_mut()
+    }
+
     /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
     pub fn openssl_mut(&mut self) -> &mut crate::openssl::Contexts {
         self.heap.openssl_mut()
@@ -3849,7 +3887,7 @@ impl<'h> HandleScope<'h> {
         let object = self.object(handle);
         // SAFETY: `handle` is rooted, so the cell it names is live.
         let flags = unsafe { &mut (*object.header()).flags };
-        *flags = (*flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
+        *flags = frozen_flags(*flags);
     }
 
     /// Mark a String chilled (#263): by a literal, or by `Symbol#to_s` when
@@ -3868,18 +3906,45 @@ impl<'h> HandleScope<'h> {
         // SAFETY: as above.
         let flags = unsafe { &mut (*object.header()).flags };
         let was = *flags & (CHILLED | CHILLED_SYMBOL);
+        if was == TMPLOCK {
+            return None;
+        }
         *flags &= !(CHILLED | CHILLED_SYMBOL);
         (was != 0).then_some(was & CHILLED_SYMBOL != 0)
     }
 
     /// Whether the object is chilled, and so `+@` copies it: `None` when it
-    /// is not, `Some(true)` when `Symbol#to_s` made it.
+    /// is not, `Some(true)` when `Symbol#to_s` made it. A [`TMPLOCK`]ed
+    /// String is not.
     #[must_use]
     pub fn chilled(&self, handle: Handle<'h>) -> Option<bool> {
         let object = self.object(handle);
         // SAFETY: as above.
         let flags = unsafe { (*object.header()).flags };
-        (flags & (CHILLED | CHILLED_SYMBOL) != 0).then_some(flags & CHILLED_SYMBOL != 0)
+        let chill = flags & (CHILLED | CHILLED_SYMBOL);
+        (chill != 0 && chill != TMPLOCK).then_some(flags & CHILLED_SYMBOL != 0)
+    }
+
+    /// Whether the String is [`TMPLOCK`]ed (#797).
+    #[must_use]
+    pub fn is_tmplocked(&self, handle: Handle<'h>) -> bool {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        unsafe { (*object.header()).flags & TMPLOCK == TMPLOCK }
+    }
+
+    /// Lock or unlock a String (#797), `rb_str_locktmp` and
+    /// `rb_str_unlocktmp`. The caller has unchilled it and checked it was
+    /// not already in the state asked for.
+    pub fn set_tmplocked(&mut self, handle: Handle<'h>, locked: bool) {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        let flags = unsafe { &mut (*object.header()).flags };
+        if locked {
+            *flags |= TMPLOCK;
+        } else {
+            *flags &= !TMPLOCK;
+        }
     }
 
     /// Mark a `Hash` as a keywords hash (#200). One-way: a marked hash is
@@ -4241,6 +4306,41 @@ mod tests {
             assert_eq!(scope.slice_of(storage), Some(&want[..]));
         }
         assert_eq!(scope.bytes_of(values[0]), Some(&[0, 0, 0][..]));
+    }
+
+    /// A String's temporary lock (#797) is the pair of chilled bits, which
+    /// reads as no chill, survives freezing, and is cleared by unlocking
+    /// alone; a light form that declines a chilled receiver declines it.
+    #[test]
+    fn a_tmplock_is_no_chill_and_outlives_freezing() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let string = scope.alloc(None, Payload::Slots, 1);
+        let value = scope.get(string);
+        scope.chill(string, false);
+        assert_eq!(scope.chilled(string), Some(false));
+        assert_eq!(scope.unchill(string), Some(false));
+        scope.set_tmplocked(string, true);
+        assert!(scope.is_tmplocked(string));
+        assert_eq!(scope.chilled(string), None, "a lock is not a chill");
+        assert_eq!(scope.unchill(string), None, "and unchilling leaves it");
+        assert!(scope.is_tmplocked(string));
+        assert!(
+            scope.is_frozen_or_chilled_of(value),
+            "the light forms decline it"
+        );
+        scope.freeze(string);
+        assert!(scope.is_frozen(string));
+        assert!(scope.is_tmplocked(string), "freezing keeps the lock");
+        scope.set_tmplocked(string, false);
+        assert!(!scope.is_tmplocked(string));
+        assert!(scope.is_frozen(string));
+        assert_eq!(
+            frozen_flags(CHILLED),
+            FROZEN,
+            "a chilled String thaws as it freezes"
+        );
+        assert_eq!(frozen_flags(TMPLOCK), FROZEN | TMPLOCK);
     }
 
     /// An object's size counts the classless storage it owns and not the
