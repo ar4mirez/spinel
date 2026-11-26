@@ -2045,8 +2045,11 @@ impl<'h> HandleScope<'h> {
         assert!(values.len() <= len as usize, "more values than slots");
         let class = class.map(|handle| self.get(handle));
         let value = self.heap.allocate_slots(class, values, len);
-        for &slot in values {
-            self.storable(slot);
+        // The check is a debug build's; a release build kept the empty loop.
+        if cfg!(debug_assertions) {
+            for &slot in values {
+                self.storable(slot);
+            }
         }
         self.root(value)
     }
@@ -2072,8 +2075,11 @@ impl<'h> HandleScope<'h> {
         assert!(values.len() <= len as usize, "more values than slots");
         let class = self.heap.class_object(class);
         let value = self.heap.allocate_with_storage(class, rest, values, len);
-        for &slot in values.iter().chain(rest) {
-            self.storable(slot);
+        // As in `alloc_slots`.
+        if cfg!(debug_assertions) {
+            for &slot in values.iter().chain(rest) {
+                self.storable(slot);
+            }
         }
         self.root(value)
     }

@@ -707,8 +707,11 @@ pub struct Classes {
     walks: u64,
     /// Whether `Integer`'s and `Float`'s operators are still the VM's own, which
     /// is the question an operator instruction asks before it answers without
-    /// dispatching (#239). See [`Classes::operator_is_native`].
-    operator_guards: [OperatorGuard; 2],
+    /// dispatching (#239), and whether `NilClass#nil?` is still the core
+    /// library's, which a call asks before it answers `nil.nil?` without a
+    /// frame (#751). See [`Classes::operator_is_native`] and
+    /// [`Classes::fresh_nil_p`].
+    operator_guards: [OperatorGuard; 3],
     /// Cleared by every [`Classes::invalidate`], so the guards are re-read only
     /// after something was defined somewhere.
     operators_fresh: bool,
@@ -740,8 +743,13 @@ pub struct Classes {
     deferred: Option<Vec<ClassId>>,
 }
 
-/// One numeric class's operators: the bodies the VM installed, and which of
-/// them a lookup still finds.
+/// [`Classes::seal_operator`]'s `which` for `NilClass`, whose `nil?` it
+/// guards (#751).
+pub const NIL_P_GUARD: usize = 2;
+
+/// One numeric class's operators, or `NilClass#nil?`: the bodies the VM
+/// installed or the core library defined, and which of them a lookup still
+/// finds.
 ///
 /// `native` is only as fresh as `serial`. A definition anywhere in the class's
 /// ancestry moves the class serial, and the next question re-resolves all of
@@ -879,7 +887,9 @@ impl Classes {
     /// `op`, so [`Classes::operator_is_native`] has something to compare with.
     ///
     /// `which` is 0 for `Integer` and 1 for `Float`: the two classes whose
-    /// instances an operator instruction answers for without a send.
+    /// instances an operator instruction answers for without a send. It is
+    /// [`NIL_P_GUARD`] for `NilClass`, whose `nil?` is the one name sealed
+    /// there, as `op` 0, and whose body is Ruby's rather than a primitive.
     pub fn seal_operator(
         &mut self,
         which: usize,
@@ -936,7 +946,44 @@ impl Classes {
             .then(|| self.operator_guards[which].native)
     }
 
-    /// Re-resolve the sealed names of each numeric class whose serial moved.
+    /// Whether a call of `name` on `nil` still resolves to the public
+    /// `NilClass#nil?` the core library defined, which
+    /// [`Classes::seal_operator`] sealed under [`NIL_P_GUARD`] once it had
+    /// loaded: CRuby's `BOP_NIL_P`, which its `opt_nil_p` asks before it
+    /// answers `true` without a call (#751). False unless `name` is the sealed
+    /// `nil?` — an alias of `Kernel#nil?` under another name is a method
+    /// `NilClass` may define for itself — and false until it is sealed, so a
+    /// heap without the core library never answers without asking. `None`
+    /// when a definition since the last question means the guards need
+    /// refreshing first, a write, as for [`Classes::fresh_native_operators`].
+    #[inline]
+    pub fn fresh_nil_p(&self, name: SymbolId) -> Option<bool> {
+        self.operators_fresh.then(|| self.nil_p_native(name))
+    }
+
+    /// [`Classes::fresh_nil_p`], refreshing the guards first when they need
+    /// it.
+    pub fn nil_p(&mut self, name: SymbolId) -> bool {
+        if !self.operators_fresh {
+            self.refresh_operators();
+        }
+        self.nil_p_native(name)
+    }
+
+    fn nil_p_native(&self, name: SymbolId) -> bool {
+        let guard = &self.operator_guards[NIL_P_GUARD];
+        guard.class.is_some()
+            && guard.native & 1 != 0
+            && guard
+                .sealed
+                .first()
+                .is_some_and(|&(_, sealed, _)| sealed == name)
+    }
+
+    /// Re-resolve the sealed names of each guarded class whose serial moved.
+    /// A name counts only while a lookup finds the sealed body, on the class
+    /// that sealed it, public: `private :+` or `private :nil?` makes a call
+    /// with a receiver refuse, which only a send says.
     #[cold]
     fn refresh_operators(&mut self) {
         for which in 0..self.operator_guards.len() {
@@ -953,10 +1000,9 @@ impl Classes {
             let sealed = std::mem::take(&mut self.operator_guards[which].sealed);
             let mut native = 0u32;
             for &(op, name, body) in &sealed {
-                if self
-                    .lookup(class, name)
-                    .is_some_and(|m| m.owner == class && m.body == body)
-                {
+                if self.lookup(class, name).is_some_and(|m| {
+                    m.owner == class && m.body == body && m.visibility == Visibility::Public
+                }) {
                     native |= 1 << op;
                 }
             }
@@ -3749,6 +3795,46 @@ mod tests {
         // A qualified lookup gets no such fallback: `Outer::TOP` is a NameError
         // in Ruby, which is what removing it in 2.5 means.
         assert_eq!(scope.classes().const_get_qualified(outer, top), None);
+    }
+
+    #[test]
+    fn the_nil_p_guard_holds_while_a_lookup_finds_the_sealed_body_public() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let m = scope.define_module(Some("M"));
+        let name = SymbolId(4);
+        let classes = scope.classes_mut();
+        let boot = Value::fixnum(1).unwrap();
+        classes.define_method(c, name, boot);
+        // Before the core library seals it, a call never answers by itself.
+        assert!(!classes.nil_p(name));
+        classes.seal_operator(NIL_P_GUARD, c, 0, name, boot);
+        assert!(classes.nil_p(name));
+        assert_eq!(classes.fresh_nil_p(name), Some(true));
+        // Another name is not the sealed `nil?`, whatever body it finds.
+        let other = SymbolId(5);
+        classes.define_method(c, other, boot);
+        assert!(!classes.nil_p(other));
+        assert_eq!(classes.fresh_nil_p(other), Some(false));
+        assert!(classes.nil_p(name));
+
+        // `private :nil?` makes a call with a receiver refuse, which only a
+        // send says; `public` gives the answer back, the body unchanged.
+        classes.set_visibility(c, name, Visibility::Private);
+        assert_eq!(classes.fresh_nil_p(name), None);
+        assert!(!classes.nil_p(name));
+        classes.set_visibility(c, name, Visibility::Public);
+        assert!(classes.nil_p(name));
+
+        // Another body, and then a module prepended in front of the first.
+        classes.define_method(c, name, Value::fixnum(2).unwrap());
+        assert!(!classes.nil_p(name));
+        classes.define_method(c, name, boot);
+        assert!(classes.nil_p(name));
+        classes.define_method(m, name, Value::fixnum(9).unwrap());
+        classes.prepend(c, m).unwrap();
+        assert!(!classes.nil_p(name));
     }
 
     #[test]

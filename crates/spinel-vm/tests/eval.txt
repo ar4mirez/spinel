@@ -2936,6 +2936,25 @@ def b751(d) = d == 0 ? [nil, nil] : [b751(d - 1), b751(d - 1)]; def e751(l, r) =
 # without asking `to_a` — not an Array's singleton one, nor a subclass's — and
 # an object that has a `to_a` still asks it, however warm the site.
 def s751(*a) = a; class T751; def to_a = [:t]; end; class B751 < Array; def to_a = [:no]; end; a = [1, 2]; def a.to_a = [:single]; r = []; 3.times { [[1, 2], T751.new, nil, a, B751[3], T751.new, [4]].each { |x| r << s751(0, *x) } }; r.uniq  #=> [[0, 1, 2], [0, :t], [0], [0, 3], [0, 4]]
+# `nil.nil?` from a site whose entry is `Kernel#nil?`'s for Arrays is answered
+# without a frame only while `NilClass#nil?` is the core library's: a refinement
+# where the call is written still answers its own.
+module Rn751; refine(NilClass) { def nil? = :refined }; end; class Un751; def plain(o) = o.nil?; using Rn751; def ref(o) = o.nil?; end; u = Un751.new; [[1], nil, [2], nil, 3, nil].flat_map { |o| [u.plain(o), u.ref(o)] }  #=> [false, false, true, :refined, false, false, true, :refined, false, false, true, :refined]
+# An alias of `Kernel#nil?` under another name is not `nil?`, so `nil` answers its own method for it.
+class Object; alias_method :isnil751, :nil?; end; class NilClass; def isnil751 = :mine; end; def w751(x) = x.isnil751; [w751([1]), w751(nil), w751([2]), w751(nil), w751(3), w751(nil)]  #=> [false, :mine, false, :mine, false, :mine]
+# An operator made private is refused at the next call, as a redefinition
+# is heard: the guard holds only while the sealed body is found public.
+def ad751(a, b) = a + b; r = [ad751(1, 2), ad751(1.5, 1.0)]; class Integer; private :+; end; r << (begin; ad751(1, 2); rescue NoMethodError => e; e.message; end) << ad751(1.5, 1.0); class Integer; public :+; end; r << ad751(3, 4)  #=> [3, 2.5, "private method '+' called for an instance of Integer", 2.5, 7]
+# A splat call bound by its plan alone: another count, `nil`, a private method
+# from a receiver that is not `self`, a refinement where the call is written, a
+# redefinition, two splats and an optional parameter the site leaves out each
+# answer as the general path does.
+def a751(x, y) = [x, y]; def c751(v) = (a751(*v) rescue $!.message); [c751([1, 2]), c751([3]), c751([4, 5]), c751(nil), c751([6, 7, 8]), c751([9, 10])]  #=> [[1, 2], "wrong number of arguments (given 1, expected 2)", [4, 5], "wrong number of arguments (given 0, expected 2)", "wrong number of arguments (given 3, expected 2)", [9, 10]]
+class Pv751; def go(v) = self.priv(*v); def other(o, v) = (o.priv(*v) rescue $!.class); private def priv(a, b) = a + b; end; q = Pv751.new; [q.go([1, 2]), q.go([3, 4]), q.other(Pv751.new, [1, 2]), q.go([5, 6])]  #=> [3, 7, NoMethodError, 11]
+class Rs751; def m(a, b) = :plain; end; module RsR751; refine(Rs751) { def m(a, b) = :refined }; end; class RsU751; def plain(o, v) = o.m(*v); using RsR751; def ref(o, v) = o.m(*v); end; o = Rs751.new; u = RsU751.new; [u.plain(o, [1, 2]), u.ref(o, [1, 2]), u.plain(o, [1, 2]), u.ref(o, [1, 2])]  #=> [:plain, :refined, :plain, :refined]
+class Sv751; def m(a, b) = a + b; end; def sv751(o, v) = o.m(*v); o = Sv751.new; r = [sv751(o, [1, 2]), sv751(o, [3, 4])]; class Sv751; def m(a, b) = a * b; end; r << sv751(o, [3, 4]) << sv751(o, [5, 6])  #=> [3, 7, 12, 30]
+def m751(a, b, c) = [a, b, c]; def mm751(x, y) = m751(*x, *y); [mm751([1], [2, 3]), mm751([1, 2], [3]), mm751(nil, [1, 2, 3]), (mm751([1], [2]) rescue $!.message), mm751([4], [5, 6])]  #=> [[1, 2, 3], [1, 2, 3], [1, 2, 3], "wrong number of arguments (given 2, expected 3)", [4, 5, 6]]
+def o751(a, b = :d) = [a, b]; def oo751(v) = o751(*v); [oo751([1]), oo751([1, 2]), oo751([3]), oo751([4, 5])]  #=> [[1, :d], [1, 2], [3, :d], [4, 5]]
 # ------------------------------- the call loop's own instructions and returns (#746, #750)
 # An if or unless whose value nothing reads compiles to its test and its arms
 # alone; a missing arm pushes nothing, and `x unless c` is one jump.
