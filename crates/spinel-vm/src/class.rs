@@ -331,7 +331,19 @@ pub struct Origin {
 
 /// One method table entry: the body, the scope its `def` was written in, its
 /// visibility, and where it was defined if it stands in for another entry.
-type MethodEntry = (Value, CrefId, Visibility, Option<Origin>);
+pub(crate) type MethodEntry = (Value, CrefId, Visibility, Option<Origin>);
+
+/// The entry [`Classes::define_method`] would make for `name`: public at the
+/// top level's scope, unless the name is one Ruby always makes private. For a
+/// table built once and installed with [`Classes::install_methods`].
+pub(crate) fn top_level_entry(name: SymbolId, body: Value) -> MethodEntry {
+    let visibility = if is_always_private(name) {
+        Visibility::Private
+    } else {
+        Visibility::default()
+    };
+    (body, CrefId::ROOT, visibility, None)
+}
 
 /// Which end of the class a module is being spliced onto.
 ///
@@ -1253,6 +1265,28 @@ impl Classes {
         self.entry_mut(id)
             .methods
             .insert(name, (body, cref, visibility, origin));
+        self.invalidate(id);
+    }
+
+    /// Give class `id`, which has no methods yet, the method table `methods`:
+    /// what a [`Classes::define_method`] of each entry would leave it, made by
+    /// copying one table rather than by inserting each entry (#652).
+    ///
+    /// # Panics
+    ///
+    /// If the class already has methods, or a program is already watching
+    /// optimised methods: then the copy would not be what the definitions are.
+    pub(crate) fn install_methods(&mut self, id: ClassId, methods: &SymbolMap<MethodEntry>) {
+        assert!(
+            self.entry(id).methods.is_empty(),
+            "install_methods replaces a method table, so it must be empty"
+        );
+        // What `note_redefinition` checks first, and there is nothing to note.
+        assert!(
+            self.optimised.is_empty(),
+            "nothing watches optimised methods before the core library loads"
+        );
+        self.entry_mut(id).methods.clone_from(methods);
         self.invalidate(id);
     }
 
