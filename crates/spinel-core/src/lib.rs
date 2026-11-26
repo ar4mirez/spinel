@@ -183,7 +183,7 @@ fn image() -> &'static [Arc<Iseq>] {
                         .collect::<Vec<_>>()
                         .join("; ")
                 );
-                let iseq = compile::program(&parsed.program)
+                let iseq = compile::core_program(&parsed.program)
                     .unwrap_or_else(|e| panic!("{name} does not compile: {e:?}"));
                 Arc::new(iseq)
             })
