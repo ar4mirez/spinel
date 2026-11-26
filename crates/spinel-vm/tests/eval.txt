@@ -2940,6 +2940,8 @@ def s751(*a) = a; class T751; def to_a = [:t]; end; class B751 < Array; def to_a
 # without a frame only while `NilClass#nil?` is the core library's: a refinement
 # where the call is written still answers its own.
 module Rn751; refine(NilClass) { def nil? = :refined }; end; class Un751; def plain(o) = o.nil?; using Rn751; def ref(o) = o.nil?; end; u = Un751.new; [[1], nil, [2], nil, 3, nil].flat_map { |o| [u.plain(o), u.ref(o)] }  #=> [false, false, true, :refined, false, false, true, :refined, false, false, true, :refined]
+# An alias of `Kernel#nil?` under another name is not `nil?`, so `nil` answers its own method for it.
+class Object; alias_method :isnil751, :nil?; end; class NilClass; def isnil751 = :mine; end; def w751(x) = x.isnil751; [w751([1]), w751(nil), w751([2]), w751(nil), w751(3), w751(nil)]  #=> [false, :mine, false, :mine, false, :mine]
 # An operator made private is refused at the next call, as a redefinition
 # is heard: the guard holds only while the sealed body is found public.
 def ad751(a, b) = a + b; r = [ad751(1, 2), ad751(1.5, 1.0)]; class Integer; private :+; end; r << (begin; ad751(1, 2); rescue NoMethodError => e; e.message; end) << ad751(1.5, 1.0); class Integer; public :+; end; r << ad751(3, 4)  #=> [3, 2.5, "private method '+' called for an instance of Integer", 2.5, 7]

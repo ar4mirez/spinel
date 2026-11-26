@@ -946,31 +946,38 @@ impl Classes {
             .then(|| self.operator_guards[which].native)
     }
 
-    /// Whether `nil.nil?` still resolves to the public `NilClass#nil?` the
-    /// core library defined, which [`Classes::seal_operator`] sealed under
-    /// [`NIL_P_GUARD`] once it had loaded: CRuby's `BOP_NIL_P`, which its
-    /// `opt_nil_p` asks before it answers `true` without a call (#751).
-    /// False until it is sealed, so a heap without the core library never
-    /// answers without asking. `None` when a definition since the last
-    /// question means the guards need refreshing first, a write, as for
-    /// [`Classes::fresh_native_operators`].
+    /// Whether a call of `name` on `nil` still resolves to the public
+    /// `NilClass#nil?` the core library defined, which
+    /// [`Classes::seal_operator`] sealed under [`NIL_P_GUARD`] once it had
+    /// loaded: CRuby's `BOP_NIL_P`, which its `opt_nil_p` asks before it
+    /// answers `true` without a call (#751). False unless `name` is the sealed
+    /// `nil?` — an alias of `Kernel#nil?` under another name is a method
+    /// `NilClass` may define for itself — and false until it is sealed, so a
+    /// heap without the core library never answers without asking. `None`
+    /// when a definition since the last question means the guards need
+    /// refreshing first, a write, as for [`Classes::fresh_native_operators`].
     #[inline]
-    pub fn fresh_nil_p(&self) -> Option<bool> {
-        self.operators_fresh.then(|| self.nil_p_native())
+    pub fn fresh_nil_p(&self, name: SymbolId) -> Option<bool> {
+        self.operators_fresh.then(|| self.nil_p_native(name))
     }
 
     /// [`Classes::fresh_nil_p`], refreshing the guards first when they need
     /// it.
-    pub fn nil_p(&mut self) -> bool {
+    pub fn nil_p(&mut self, name: SymbolId) -> bool {
         if !self.operators_fresh {
             self.refresh_operators();
         }
-        self.nil_p_native()
+        self.nil_p_native(name)
     }
 
-    fn nil_p_native(&self) -> bool {
+    fn nil_p_native(&self, name: SymbolId) -> bool {
         let guard = &self.operator_guards[NIL_P_GUARD];
-        guard.class.is_some() && guard.native & 1 != 0
+        guard.class.is_some()
+            && guard.native & 1 != 0
+            && guard
+                .sealed
+                .first()
+                .is_some_and(|&(_, sealed, _)| sealed == name)
     }
 
     /// Re-resolve the sealed names of each guarded class whose serial moved.
@@ -3801,27 +3808,33 @@ mod tests {
         let boot = Value::fixnum(1).unwrap();
         classes.define_method(c, name, boot);
         // Before the core library seals it, a call never answers by itself.
-        assert!(!classes.nil_p());
+        assert!(!classes.nil_p(name));
         classes.seal_operator(NIL_P_GUARD, c, 0, name, boot);
-        assert!(classes.nil_p());
-        assert_eq!(classes.fresh_nil_p(), Some(true));
+        assert!(classes.nil_p(name));
+        assert_eq!(classes.fresh_nil_p(name), Some(true));
+        // Another name is not the sealed `nil?`, whatever body it finds.
+        let other = SymbolId(5);
+        classes.define_method(c, other, boot);
+        assert!(!classes.nil_p(other));
+        assert_eq!(classes.fresh_nil_p(other), Some(false));
+        assert!(classes.nil_p(name));
 
         // `private :nil?` makes a call with a receiver refuse, which only a
         // send says; `public` gives the answer back, the body unchanged.
         classes.set_visibility(c, name, Visibility::Private);
-        assert_eq!(classes.fresh_nil_p(), None);
-        assert!(!classes.nil_p());
+        assert_eq!(classes.fresh_nil_p(name), None);
+        assert!(!classes.nil_p(name));
         classes.set_visibility(c, name, Visibility::Public);
-        assert!(classes.nil_p());
+        assert!(classes.nil_p(name));
 
         // Another body, and then a module prepended in front of the first.
         classes.define_method(c, name, Value::fixnum(2).unwrap());
-        assert!(!classes.nil_p());
+        assert!(!classes.nil_p(name));
         classes.define_method(c, name, boot);
-        assert!(classes.nil_p());
+        assert!(classes.nil_p(name));
         classes.define_method(m, name, Value::fixnum(9).unwrap());
         classes.prepend(c, m).unwrap();
-        assert!(!classes.nil_p());
+        assert!(!classes.nil_p(name));
     }
 
     #[test]

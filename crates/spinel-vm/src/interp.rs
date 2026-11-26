@@ -6792,13 +6792,14 @@ fn native_send(
     if scope.class_object_of(receiver) != Some(plan.class_object) {
         // `nil.nil?` from a site whose entry is `Kernel#nil?`'s, for the
         // class its other receivers are: `true`, as CRuby's `opt_nil_p`
-        // answers it, while `NilClass#nil?` is still the core library's.
+        // answers it, while the site calls the sealed `nil?` and
+        // `NilClass#nil?` is still the core library's.
         // The site keeps the entry it has, rather than swapping `nil`'s in
         // front and back at nearly every call over a tree of Arrays and
         // `nil`s, each swap a frame pushed for `NilClass#nil?` (#751).
         if receiver == Value::NIL
             && matches!(plan.native, Native::NilP)
-            && nil_answers_nil_p(scope, frame)
+            && nil_answers_nil_p(scope, frame, plan.name)
         {
             return Some((at, Value::TRUE));
         }
@@ -6829,18 +6830,18 @@ fn native_send(
     Some((at, value))
 }
 
-/// Whether a call of `nil?` on `nil` from `frame` would run the core
+/// Whether a call of `name` on `nil` from `frame` would run the core
 /// library's `NilClass#nil?`, whose answer is `true`, and nothing a program
 /// could see besides: no `TracePoint` waiting for the frame's events, no
 /// refinement where the call is written, no warning or redefinition for
 /// `dispatch` to say first (as [`native_send`] leaves those to it), and the
-/// method still the public body the core library defined
-/// ([`Classes::fresh_nil_p`]). Out of line, so that the loops
+/// method still the public body the core library defined, under the name
+/// it sealed, `nil?` ([`Classes::fresh_nil_p`]). Out of line, so that the loops
 /// [`native_send`] is inlined into carry only the call.
 ///
 /// [`Classes::fresh_nil_p`]: crate::class::Classes::fresh_nil_p
 #[inline(never)]
-fn nil_answers_nil_p(scope: &mut HandleScope<'_>, frame: &Call) -> bool {
+fn nil_answers_nil_p(scope: &mut HandleScope<'_>, frame: &Call, name: SymbolId) -> bool {
     if scope.trace_events() != 0 || scope.has_pending_warning() {
         return false;
     }
@@ -6848,9 +6849,9 @@ fn nil_answers_nil_p(scope: &mut HandleScope<'_>, frame: &Call) -> bool {
     if classes.cref_refined(frame.cref) || classes.has_redefined() {
         return false;
     }
-    match classes.fresh_nil_p() {
+    match classes.fresh_nil_p(name) {
         Some(native) => native,
-        None => scope.classes_mut().nil_p(),
+        None => scope.classes_mut().nil_p(name),
     }
 }
 
