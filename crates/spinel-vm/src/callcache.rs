@@ -270,6 +270,13 @@ pub struct Direct {
     /// the site's order: every argument is then already where its local
     /// goes, once the receiver below them is gone.
     pub in_order: bool,
+    /// Whether a `return` anywhere in the callee's body ends its frame and
+    /// nothing else: the body has no catch table, so no `ensure` to run on
+    /// the way out, and is not an `eval` string's, whose `return` has rules
+    /// of its own. What `interp::returns_in_place` asks of a frame at every
+    /// return, asked of the body once here and kept on the frames the plan
+    /// pushes (#746).
+    pub returns_plainly: bool,
     /// The optional parameters, positional or keyword, that a call from this
     /// site does not supply.
     pub undef: Box<[u16]>,
