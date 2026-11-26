@@ -243,7 +243,7 @@ impl Drop for Mappings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mappings, Request, page_size};
+    use super::{Mappings, Request};
 
     fn anonymous(len: usize) -> Request {
         Request {
@@ -321,7 +321,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn a_remap_keeps_what_fits_and_the_table_follows() {
         let mut maps = Mappings::default();
-        let page = page_size();
+        let page = super::page_size();
         let at = maps.map(anonymous(page)).expect("mapped");
         assert!(maps.write(at, 0, b"abcd"));
         let at = maps.remap(at, 2).expect("shrunk");
