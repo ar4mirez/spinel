@@ -19309,11 +19309,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__iobuf_move__"],
-            Native::IoBuf(IoBufOp::Move),
-        ),
-        (
-            Builtin::Kernel,
             &["__iobuf_page_size__"],
             Native::IoBuf(IoBufOp::PageSize),
         ),
@@ -29966,9 +29961,6 @@ fn outcome_value(scope: &mut HandleScope<'_>, outcome: crate::ffi::Outcome) -> V
     }
 }
 
-/// The C calls `lib/spinel/ffi.rb` is Ruby over; `ffi.rs` makes them.
-/// Memory at an address the program gives is the program's to get right, as
-/// it is in C and in CRuby's `fiddle`: Spinel's own heap is never one of them.
 /// `IO::Buffer`'s mapped memory (#797): see [`IoBufOp`] for each call and
 /// `iobuf.rs` for the checks that make an address from Ruby safe to use.
 fn iobuf_native(
@@ -30036,13 +30028,6 @@ fn iobuf_native(
             let byte = int_arg(call, 3).unwrap_or(0) as u8;
             bool_value(scope.mappings_mut().fill(address, offset, len, byte))
         }
-        IoBufOp::Move => {
-            let address = address_arg(scope, call, 0)?;
-            let from = size_arg(call, 1)?;
-            let to = size_arg(call, 2)?;
-            let len = size_arg(call, 3)?;
-            bool_value(scope.mappings_mut().move_within(address, from, to, len))
-        }
         IoBufOp::PageSize => {
             Value::fixnum(iobuf::page_size() as i64).expect("a page size is a fixnum")
         }
@@ -30051,6 +30036,9 @@ fn iobuf_native(
     Ok(None)
 }
 
+/// The C calls `lib/spinel/ffi.rb` is Ruby over; `ffi.rs` makes them.
+/// Memory at an address the program gives is the program's to get right, as
+/// it is in C and in CRuby's `fiddle`: Spinel's own heap is never one of them.
 fn ffi_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,

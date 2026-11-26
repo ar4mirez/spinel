@@ -224,26 +224,6 @@ impl Mappings {
         true
     }
 
-    /// Copy `len` bytes from `from` to `to` in the mapping at `address`,
-    /// overlapping or not, under [`Mappings::write`]'s rules for both
-    /// ranges: `IO::Buffer#copy` from a slice of the same buffer.
-    pub fn move_within(&mut self, address: usize, from: usize, to: usize, len: usize) -> bool {
-        let readable = self
-            .regions
-            .get(&address)
-            .is_some_and(|region| from.checked_add(len).is_some_and(|end| end <= region.len));
-        if !readable {
-            return false;
-        }
-        let Some(target) = self.writable_range(address, to, len) else {
-            return false;
-        };
-        // SAFETY: both ranges lie inside the one live mapping, the target
-        // writable; `copy` allows them to overlap.
-        unsafe { std::ptr::copy((address + from) as *const u8, target, len) };
-        true
-    }
-
     fn writable_range(&self, address: usize, offset: usize, len: usize) -> Option<*mut u8> {
         let region = self.regions.get(&address)?;
         let end = offset.checked_add(len)?;
@@ -285,8 +265,6 @@ mod tests {
         assert_eq!(maps.read(at, 10, 5).as_deref(), Some(&b"hello"[..]));
         assert!(maps.fill(at, 11, 3, b'z'));
         assert_eq!(maps.read(at, 10, 5).as_deref(), Some(&b"hzzzo"[..]));
-        assert!(maps.move_within(at, 10, 12, 5));
-        assert_eq!(maps.read(at, 10, 7).as_deref(), Some(&b"hzhzzzo"[..]));
         assert!(maps.unmap(at));
         assert!(maps.is_empty());
     }
@@ -299,7 +277,6 @@ mod tests {
         assert_eq!(maps.read(at, usize::MAX, 2).as_deref(), None);
         assert!(!maps.write(at, 16, b"x"));
         assert!(!maps.fill(at, 8, 9, 0));
-        assert!(!maps.move_within(at, 0, 12, 5));
         assert_eq!(
             maps.read(at + 1, 0, 1).as_deref(),
             None,

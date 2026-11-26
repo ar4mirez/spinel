@@ -1011,9 +1011,6 @@ pub enum IoBufOp {
     Write,
     /// `__iobuf_fill__(address, offset, length, byte)`: whether it was.
     Fill,
-    /// `__iobuf_move__(address, from, to, length)`: a copy inside one
-    /// mapping, the ranges allowed to overlap; whether it was made.
-    Move,
     /// `__iobuf_page_size__`: `sysconf(_SC_PAGESIZE)`.
     PageSize,
 }
