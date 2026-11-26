@@ -20969,9 +20969,9 @@ fn native_run<const MORE: bool, const KEPT: bool>(
 /// matched where it stands. [`light_stretch`]'s loop wants the copy:
 /// matched in place there, it ran out of registers and kept the body's
 /// address on the stack, a load on the path of every dispatch, `getivar`
-/// 20% more cycles in fewer instructions. The other loops, `calls_loop`'s
-/// and `more_stretch`'s, keep it in a register either way and match in
-/// place, which reads only the arm's own fields (#746).
+/// 9% more cycles than main in fewer instructions. The other loops,
+/// `calls_loop`'s and `more_stretch`'s, keep it in a register either way
+/// and match in place, which reads only the arm's own fields (#746).
 #[inline(always)]
 fn stretch<const MORE: bool, const COPIED: bool>(
     scope: &mut HandleScope<'_>,
