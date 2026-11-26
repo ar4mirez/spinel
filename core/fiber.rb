@@ -65,6 +65,82 @@ class Fiber
     current.blocking? ? 1 : false
   end
 
+  # The current fiber made blocking for the block (#797), so the scheduler
+  # is not asked meanwhile; a fiber already blocking is left as it is.
+  def self.blocking
+    fiber = current
+    return yield(fiber) if fiber.blocking?
+    fiber.__set_blocking__(true)
+    begin
+      yield fiber
+    ensure
+      fiber.__set_blocking__(false)
+    end
+  end
+
+  def __set_blocking__(blocking)
+    @__blocking__ = blocking
+  end
+
+  # --- the scheduler (#797) ---------------------------------------------------
+  # One per thread, as CRuby keeps `thread->scheduler`: what `set_scheduler`
+  # gave the thread. It is *current* only in a fiber that is not blocking —
+  # not the root fiber, not one made `blocking: true`, not inside
+  # `Fiber.blocking` — and only then do `sleep`, an IO's waits, reads and
+  # writes, and `IO::Buffer#read` and `#write` hand themselves to it, as
+  # `rb_fiber_scheduler_current` decides.
+
+  def self.scheduler
+    Thread.current.__scheduler__
+  end
+
+  def self.current_scheduler
+    current.blocking? ? nil : Thread.current.__scheduler__
+  end
+
+  def self.set_scheduler(scheduler)
+    unless scheduler.nil?
+      %i[block unblock kernel_sleep io_wait].each do |hook|
+        Kernel.raise ArgumentError, "Scheduler must implement ##{hook}" unless scheduler.respond_to?(hook)
+      end
+    end
+    thread = Thread.current
+    # The one there is closed first, so it runs what it has to completion
+    # before another takes over; it is gone however that ends.
+    previous = thread.__scheduler__
+    unless previous.nil?
+      begin
+        __close_scheduler__(previous)
+      ensure
+        thread.__scheduler__ = nil
+      end
+    end
+    thread.__scheduler__ = scheduler
+  end
+
+  # `rb_fiber_scheduler_close`: `scheduler_close` if it has one, for a
+  # scheduler whose own `close` sets the scheduler to nil, else `close`.
+  def self.__close_scheduler__(scheduler)
+    return scheduler.__send__(:scheduler_close) if scheduler.respond_to?(:scheduler_close, true)
+    return scheduler.__send__(:close) if scheduler.respond_to?(:close, true)
+    nil
+  end
+
+  # The thread's scheduler, not only the current one: `Fiber.schedule` in a
+  # blocking fiber still schedules.
+  def self.schedule(*args, **keywords, &block)
+    scheduler = Thread.current.__scheduler__
+    Kernel.raise RuntimeError, "No scheduler is available!" if scheduler.nil?
+    scheduler.fiber(*args, **keywords, &block)
+  end
+
+  # The end of a thread's block, and of the program before its `at_exit`
+  # blocks: the scheduler left is closed, which runs what it has scheduled,
+  # as CRuby's `thread_do_start` and `rb_ec_fiber_scheduler_finalize` do.
+  def self.__finalize_scheduler__
+    set_scheduler(nil) unless Thread.current.__scheduler__.nil?
+  end
+
   def __root__?
     @__fiber__ == -1
   end

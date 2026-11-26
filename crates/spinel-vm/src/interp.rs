@@ -48,8 +48,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IvarOp,
-    Native, OpenSslOp, PsychOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp, TraceOp,
+    BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IoBufOp,
+    IvarOp, Native, OpenSslOp, PsychOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp, TraceOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -1093,6 +1093,35 @@ fn str_native(
         stack.push(call.receiver);
         return Ok(None);
     }
+    // CRuby's `rb_str_locktmp` and `rb_str_unlocktmp`, with their messages;
+    // nil asks (#797).
+    if op == StrOp::LockTmp {
+        let locked = scope.is_tmplocked(receiver);
+        let asked = arg(0);
+        if asked.is_nil() {
+            stack.push(bool_value(locked));
+            return Ok(None);
+        }
+        let lock = asked.is_truthy();
+        if lock == locked {
+            return Err(Error::raise(
+                "RuntimeError",
+                if lock {
+                    "temporal locking already locked string"
+                } else {
+                    "temporal unlocking already unlocked string"
+                },
+            ));
+        }
+        if lock {
+            // A chilled String is thawed first, by the caller's `__modify__`
+            // or because it is frozen, so the pair is the lock's alone.
+            scope.unchill(receiver);
+        }
+        scope.set_tmplocked(receiver, lock);
+        stack.push(call.receiver);
+        return Ok(None);
+    }
     if op == StrOp::ByteSlice {
         let start = usize::try_from(index_arg(0)?).unwrap_or(0);
         let len = usize::try_from(index_arg(1)?).unwrap_or(0);
@@ -1410,6 +1439,7 @@ fn str_native(
             string_bytes_in(scope, Builtin::String.id(), &mapped, encoding)
         }
         StrOp::Splice
+        | StrOp::LockTmp
         | StrOp::ByteSlice
         | StrOp::TakeLine
         | StrOp::ByteIndex
@@ -15621,6 +15651,16 @@ fn native_call<'h>(
             } else {
                 let handle = scope.root(object);
                 if matches!(native, Native::Unchill) {
+                    // `__unchill__(object, true)` is a mutator's thaw, which a
+                    // locked String refuses as CRuby's `str_modifiable` does
+                    // (#797); `singleton_class` and `instance_variable_set`
+                    // thaw without it, as CRuby lets them past the lock.
+                    if nth_arg(&call, 1).is_truthy() && scope.is_tmplocked(handle) {
+                        return Err(Error::raise(
+                            "RuntimeError",
+                            "can't modify string; temporarily locked",
+                        ));
+                    }
                     scope.unchill(handle)
                 } else {
                     scope.chilled(handle)
@@ -15936,6 +15976,7 @@ fn native_call<'h>(
         Native::Ext(index) => ext::call(scope, stack, frames, proc_class, ids, &call, index),
         Native::Console(op) => console_native(scope, stack, &call, op),
         Native::Ffi(op) => ffi_native(scope, stack, &call, op),
+        Native::IoBuf(op) => iobuf_native(scope, stack, &call, op),
         Native::OpenSsl(op) => openssl_native(scope, stack, &call, op),
         Native::Psych(op) => psych_native(scope, stack, &call, op),
 
@@ -19238,6 +19279,46 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__iobuf_map__"],
+            Native::IoBuf(IoBufOp::Map),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_unmap__"],
+            Native::IoBuf(IoBufOp::Unmap),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_remap__"],
+            Native::IoBuf(IoBufOp::Remap),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_read__"],
+            Native::IoBuf(IoBufOp::Read),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_write__"],
+            Native::IoBuf(IoBufOp::Write),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_fill__"],
+            Native::IoBuf(IoBufOp::Fill),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_move__"],
+            Native::IoBuf(IoBufOp::Move),
+        ),
+        (
+            Builtin::Kernel,
+            &["__iobuf_page_size__"],
+            Native::IoBuf(IoBufOp::PageSize),
+        ),
+        (
+            Builtin::Kernel,
             &["__ffi_dlopen__"],
             Native::Ffi(FfiOp::Dlopen),
         ),
@@ -19655,6 +19736,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::ForceEncoding),
         ),
         (Builtin::String, &["__splice__"], Native::Str(StrOp::Splice)),
+        (
+            Builtin::String,
+            &["__locktmp__"],
+            Native::Str(StrOp::LockTmp),
+        ),
         (Builtin::String, &["<<"], Native::StringAppend("__append__")),
         (
             Builtin::String,
@@ -29883,6 +29969,88 @@ fn outcome_value(scope: &mut HandleScope<'_>, outcome: crate::ffi::Outcome) -> V
 /// The C calls `lib/spinel/ffi.rb` is Ruby over; `ffi.rs` makes them.
 /// Memory at an address the program gives is the program's to get right, as
 /// it is in C and in CRuby's `fiddle`: Spinel's own heap is never one of them.
+/// `IO::Buffer`'s mapped memory (#797): see [`IoBufOp`] for each call and
+/// `iobuf.rs` for the checks that make an address from Ruby safe to use.
+fn iobuf_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: IoBufOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::iobuf;
+    let errno = |n: i32| Value::fixnum(i64::from(n)).expect("an errno is a fixnum");
+    let mapped = |scope: &mut HandleScope<'_>, result: Result<usize, i32>| match result {
+        Ok(address) => {
+            let address = address_value(scope, address);
+            new_array(scope, &[address])
+        }
+        Err(n) => errno(n),
+    };
+    let value = match op {
+        IoBufOp::Map => {
+            let fd = int_arg(call, 0)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| Error::raise("TypeError", "a descriptor is an Integer"))?;
+            let len = size_arg(call, 1)?;
+            let offset = int_arg(call, 2)
+                .ok_or_else(|| Error::raise("TypeError", "an offset is an Integer"))?;
+            let request = iobuf::Request {
+                fd: (fd >= 0).then_some(fd),
+                len,
+                offset,
+                shared: nth_arg(call, 3).is_truthy(),
+                writable: nth_arg(call, 4).is_truthy(),
+            };
+            let result = scope.mappings_mut().map(request);
+            mapped(scope, result)
+        }
+        IoBufOp::Unmap => {
+            let address = address_arg(scope, call, 0)?;
+            bool_value(scope.mappings_mut().unmap(address))
+        }
+        IoBufOp::Remap => {
+            let address = address_arg(scope, call, 0)?;
+            let len = size_arg(call, 1)?;
+            let result = scope.mappings_mut().remap(address, len);
+            mapped(scope, result)
+        }
+        IoBufOp::Read => {
+            let address = address_arg(scope, call, 0)?;
+            let offset = size_arg(call, 1)?;
+            let len = size_arg(call, 2)?;
+            match scope.mappings_mut().read(address, offset, len) {
+                Some(bytes) => binary_value(scope, &bytes),
+                None => Value::NIL,
+            }
+        }
+        IoBufOp::Write => {
+            let address = address_arg(scope, call, 0)?;
+            let offset = size_arg(call, 1)?;
+            let bytes = bytes_at(scope, call, 2, "__iobuf_write__")?;
+            bool_value(scope.mappings_mut().write(address, offset, &bytes))
+        }
+        IoBufOp::Fill => {
+            let address = address_arg(scope, call, 0)?;
+            let offset = size_arg(call, 1)?;
+            let len = size_arg(call, 2)?;
+            let byte = int_arg(call, 3).unwrap_or(0) as u8;
+            bool_value(scope.mappings_mut().fill(address, offset, len, byte))
+        }
+        IoBufOp::Move => {
+            let address = address_arg(scope, call, 0)?;
+            let from = size_arg(call, 1)?;
+            let to = size_arg(call, 2)?;
+            let len = size_arg(call, 3)?;
+            bool_value(scope.mappings_mut().move_within(address, from, to, len))
+        }
+        IoBufOp::PageSize => {
+            Value::fixnum(iobuf::page_size() as i64).expect("a page size is a fixnum")
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
 fn ffi_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,

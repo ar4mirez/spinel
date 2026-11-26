@@ -100,7 +100,7 @@ class IO
   # nil when the timeout passed first. A reader with bytes buffered is ready
   # without asking. A third element names the descriptor to poll, in place
   # of the one `__poll_fd__` picks.
-  def self.__wait__(pairs, timeout, descriptor_only = false)
+  def self.__wait__(pairs, timeout, descriptor_only = false, select = false)
     unless timeout.nil?
       timeout = Float === timeout || Integer === timeout ? timeout : Float(timeout)
       raise ArgumentError, "time interval must not be negative" if timeout < 0
@@ -109,6 +109,18 @@ class IO
       !descriptor_only && events & IO::READABLE != 0 && io.__buffered__? ? IO::READABLE : 0
     end
     return buffered if buffered.any? { |b| b != 0 }
+    # One IO's wait in a non-blocking fiber is its scheduler's `io_wait`, as
+    # `rb_io_wait` makes it (#797): what it answers is the events ready, and
+    # anything false a timeout. `IO.select` is not one: CRuby asks
+    # `io_select` for it, which Spinel does not, and waits itself.
+    unless select
+      scheduler = Fiber.current_scheduler
+      unless scheduler.nil?
+        io, events = pairs[0]
+        ready = scheduler.io_wait(io, events, timeout)
+        return ready ? [Integer.__index__(ready)] : nil
+      end
+    end
     polls = pairs.map do |io, events, fd|
       bits = 0
       bits |= __poll__("POLLIN") if events & IO::READABLE != 0
@@ -177,7 +189,7 @@ class IO
       timeout.nil? ? sleep : sleep(timeout)
       return nil
     end
-    ready = __wait__(pairs, timeout)
+    ready = __wait__(pairs, timeout, false, true)
     return nil if ready.nil?
     out = [[], [], []]
     k = 0
@@ -2336,7 +2348,9 @@ end
     buffer.__splice__(0, buffer.bytesize, "")
     sent = 0
     begin
-      sent += __write_once__(sent == 0 ? bytes : bytes.byteslice(sent, bytes.bytesize - sent)) while sent < bytes.bytesize
+      # The buffer is sent with `write(2)` itself, never the scheduler's
+      # `io_write`, as CRuby's `io_flush_buffer_sync` sends it (#797).
+      sent += __write_once__(sent == 0 ? bytes : bytes.byteslice(sent, bytes.bytesize - sent), false) while sent < bytes.bytesize
     rescue Exception
       buffer.__splice__(0, 0, bytes.byteslice(sent, bytes.bytesize - sent))
       raise
@@ -2488,7 +2502,26 @@ end
   # CRuby does for the pipes and sockets it makes nonblocking.
   def __read_wait__(want)
     waits = @__read_kind_fd__ == @__fileno__ ? @__read_waits__ : __waits_in_read__?
+    # In a non-blocking fiber the read is the scheduler's `io_read`, when it
+    # has one, and a wait is its `io_wait` (#797).
+    scheduler = Fiber.current_scheduler
     loop do
+      chunk = scheduler.nil? ? nil : IO::Buffer.__scheduler_read__(scheduler, self, want)
+      chunk = __read_once__(want, waits, scheduler.nil?) if chunk.nil?
+      if chunk == IO.__eintr__
+        Thread.__check_interrupts__
+        raise IOError, "stream closed in another thread" if @__closed__
+        next
+      end
+      return chunk unless chunk == IO.__eagain__
+      IO.__wait__([[self, IO::READABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
+    end
+  end
+
+  # One `read(2)` of up to `want` bytes, waiting first, when `first`, for a
+  # descriptor that would otherwise stop every thread.
+  def __read_once__(want, waits, first)
+    if first
       # A blocking descriptor would stop every thread: wait for it first.
       # Alone, the main thread waits first too on a pipe or a terminal, in a
       # `poll(2)` a signal cuts short, where a `read(2)` would be restarted:
@@ -2501,17 +2534,10 @@ end
       elsif waits
         IO.__wait__([[self, IO::READABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
       end
-      # A blocking pipe or terminal is read outside the lock while another
-      # thread is alive; what cuts that short is met here.
-      chunk = __fd_read__(@__fileno__, want, waits)
-      if chunk == IO.__eintr__
-        Thread.__check_interrupts__
-        raise IOError, "stream closed in another thread" if @__closed__
-        next
-      end
-      return chunk unless chunk == IO.__eagain__
-      IO.__wait__([[self, IO::READABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
+    # A blocking pipe or terminal is read outside the lock while another
+    # thread is alive; what cuts that short is met by the caller.
+    __fd_read__(@__fileno__, want, waits)
   end
 
   # Whether a `read(2)` of this descriptor can block for ever: a pipe, a FIFO
@@ -2566,11 +2592,19 @@ end
   # short (`__fd_write__`). A write cut short — by a signal, or by another
   # thread's kill, raise or `close` while it waited — meets what cut it short
   # before it answers what it took.
-  def __write_once__(text)
+  def __write_once__(text, hooked = true)
     waits = __waits_in_write__?
+    # In a non-blocking fiber a write that goes straight out is the
+    # scheduler's `io_write`, when it has one, as CRuby's
+    # `rb_io_write_memory` makes it (#797).
+    current = Fiber.current_scheduler
+    scheduler = hooked ? current : nil
     loop do
-      IO.__wait__([[self, IO::WRITABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
-      result = __fd_write__(__wfd__, text, waits)
+      result = scheduler.nil? ? nil : IO::Buffer.__scheduler_write__(scheduler, self, text)
+      if result.nil?
+        IO.__wait__([[self, IO::WRITABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if current.nil? && __thread_others__
+        result = __fd_write__(__wfd__, text, waits)
+      end
       if result == IO.__eagain__
         IO.__wait__([[self, IO::WRITABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
         next
@@ -2773,7 +2807,7 @@ end
       return buffer || ""
     end
     if @__rbuf__.empty?
-      chunk = blocking ? __read_wait__(length) : __fd_read__(@__fileno__, length)
+      chunk = blocking ? __read_wait__(length) : __read_nonblock_once__(length)
       return :wait_readable if !blocking && chunk == IO.__eagain__
       IO.__check__(chunk, @__path__)
       if chunk.empty?
@@ -2788,6 +2822,15 @@ end
     encoding = buffer.encoding
     buffer.replace(out)
     buffer.force_encoding(encoding)
+  end
+
+  # `read_nonblock`'s one read: the scheduler's `io_read` in a non-blocking
+  # fiber, as CRuby's `io_getpartial` asks it for a nonblocking read too
+  # (#797), else `read(2)`.
+  def __read_nonblock_once__(length)
+    scheduler = Fiber.current_scheduler
+    chunk = scheduler.nil? ? nil : IO::Buffer.__scheduler_read__(scheduler, self, length)
+    chunk.nil? ? __fd_read__(@__fileno__, length) : chunk
   end
 
   # CRuby's `rb_sys_fail_on_write` for an IO with `FMODE_SIGNAL_ON_EPIPE`,
@@ -2883,7 +2926,10 @@ end
 
   # `IO.copy_stream` names the call where `pread` names the path.
   def __pread_bytes__(length, offset, path = @__path__)
-    IO.__check__(__fd_pread__(@__fileno__, length, offset), path)
+    scheduler = Fiber.current_scheduler
+    chunk = scheduler.nil? ? nil : IO::Buffer.__scheduler_read__(scheduler, self, length, offset)
+    chunk = __fd_pread__(@__fileno__, length, offset) if chunk.nil?
+    IO.__check__(chunk, path)
   end
 
   # Where the descriptor is, whatever is buffered.
@@ -4310,8 +4356,10 @@ end
     text = String === object ? object : object.to_s
     warn("syswrite for buffered IO", uplevel: 1) unless @__wbuf__.nil? || @__wbuf__.empty?
     waits = __waits_in_write__?
+    scheduler = Fiber.current_scheduler
     loop do
-      result = __fd_write__(__wfd__, text, waits)
+      result = scheduler.nil? ? nil : IO::Buffer.__scheduler_write__(scheduler, self, text)
+      result = __fd_write__(__wfd__, text, waits) if result.nil?
       if result == IO.__eintr__
         __write_interrupted__
         next
@@ -4343,7 +4391,11 @@ end
   def pwrite(object, offset)
     __write_side__
     text = String === object ? object : object.to_s
-    IO.__check__(__fd_pwrite__(__wfd__, text, Integer.__index__(offset)), @__path__)[0]
+    offset = Integer.__index__(offset)
+    scheduler = Fiber.current_scheduler
+    result = scheduler.nil? ? nil : IO::Buffer.__scheduler_write__(scheduler, self, text, offset)
+    result = __fd_pwrite__(__wfd__, text, offset) if result.nil?
+    IO.__check__(result, @__path__)[0]
   end
 
   def <<(object)

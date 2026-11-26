@@ -63,9 +63,16 @@ class Thread
                   :abort_on_exception, :priority, :name, :group, :exception, :value, :dead, :killing,
                   :location,
                   :started, :deferred, :masks, :pending, :storage, :recursive,
-                  :uninterruptible
+                  :uninterruptible, :scheduler
   end
   private_constant :State
+
+  # The thread's Fiber scheduler (#797): see `core/fiber.rb`.
+  def __scheduler__ = @__s.scheduler
+
+  def __scheduler__=(scheduler)
+    @__s.scheduler = scheduler
+  end
 
   # Measured: CRuby's `Thread` has no allocator.
   def self.allocate
@@ -414,6 +421,9 @@ class Thread
       Kernel.throw self if @__s.killing
       Thread.__raise_here__(@__s.deferred) unless @__s.deferred.nil?
       @__s.value = @__s.block.call(*@__s.args)
+      # A block that returns closes its scheduler, which runs what it
+      # scheduled, as CRuby's `thread_do_start` does (#797).
+      Fiber.__finalize_scheduler__
     rescue Exception => e
       @__s.exception = e
       # An `exit` from any thread ends the program: the main thread gets it.

@@ -74,6 +74,15 @@ module Kernel
     # `$!` has gone back to nil.
     @__uncaught__ = error
     status = error.nil? ? 0 : __status_of__(error)
+    # The main thread's Fiber scheduler is closed before any of them, which
+    # runs what it scheduled; what that raises is reported and changes
+    # nothing else, as CRuby's `rb_ec_fiber_scheduler_finalize` (#797).
+    begin
+      Fiber.__finalize_scheduler__
+    rescue SystemExit
+    rescue Exception => e
+      $stderr.write(e.full_message)
+    end
     # `trap(:EXIT)` first, then the `at_exit` blocks, last registered first.
     handlers = __at_exit__
     handlers.push(-> { Signal.__run_exit__ })

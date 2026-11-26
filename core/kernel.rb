@@ -396,12 +396,17 @@ module Kernel
   end
 
   # The `FrozenError` every mutator raises: the class, then `inspect`. An
-  # object that may be changed is thawed, in case it is chilled.
+  # object that may be changed is thawed, in case it is chilled, and a
+  # String an `IO::Buffer.for` block holds is refused (#797), before it is
+  # found frozen, as CRuby's `str_modifiable` checks the lock first.
   def self.__check_frozen__(object)
     if object.frozen?
+      if String === object && object.__locktmp__(nil)
+        raise RuntimeError, "can't modify string; temporarily locked"
+      end
       raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
     end
-    __thaw__(object)
+    __thaw__(object, true)
   end
 
   # `send`, `__send__` and `public_send` with a name that is neither a Symbol
@@ -430,9 +435,10 @@ module Kernel
   # mutable, and says so the first time it is changed: the deprecation
   # warning, once, and it is an ordinary String after that. `def s.m`,
   # `class << s` and `@x =` in a String method are instructions rather than
-  # methods; the VM sends them here too (#341).
-  def self.__thaw__(object)
-    case __unchill__(object)
+  # methods; the VM sends them here too (#341). `modify` is a mutator's
+  # thaw, which a temporarily locked String refuses (#797).
+  def self.__thaw__(object, modify = false)
+    case __unchill__(object, modify)
     when :literal
       __warning__("literal string will be frozen in the future " \
                   "(run with --debug-frozen-string-literal for more information)", false, :deprecated)
@@ -609,6 +615,14 @@ module Kernel
   def sleep(*args)
     if args.size > 1
       raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..1)"
+    end
+    # A non-blocking fiber's sleep is its scheduler's, the arguments as
+    # given (#797).
+    scheduler = Fiber.current_scheduler
+    unless scheduler.nil?
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      scheduler.kernel_sleep(*args)
+      return (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round
     end
     duration = args[0]
     seconds =

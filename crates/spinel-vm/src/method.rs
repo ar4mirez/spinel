@@ -600,6 +600,8 @@ pub enum Native {
     Console(ConsoleOp),
     /// The C calls `lib/spinel/ffi.rb` is Ruby over (#105).
     Ffi(FfiOp),
+    /// The mapped memory `core/io_buffer.rb` is Ruby over (#797).
+    IoBuf(IoBufOp),
     /// The OpenSSL calls `lib/openssl/spinel.rb` is Ruby over (#106).
     OpenSsl(OpenSslOp),
     /// The libyaml calls `lib/psych/spinel.rb` is Ruby over (#108).
@@ -988,6 +990,34 @@ pub enum EtcOp {
     Constants,
 }
 
+/// Which `IO::Buffer` primitive (#797). See `iobuf.rs` for the mappings and
+/// `interp.rs`, `iobuf_native`, for what each takes and answers. A mapping
+/// is named by its address, an Integer, and every range is checked against
+/// it there, so a wrong one is refused rather than read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoBufOp {
+    /// `__iobuf_map__(fd, size, offset, shared, writable)`: `[address]`, or
+    /// the errno. An fd of -1 maps anonymous, zero-filled memory.
+    Map,
+    /// `__iobuf_unmap__(address)`: whether there was such a mapping.
+    Unmap,
+    /// `__iobuf_remap__(address, size)`: `[address]` of the mapping made
+    /// that long, its bytes kept as far as they fit, or the errno.
+    Remap,
+    /// `__iobuf_read__(address, offset, length)`: the bytes, BINARY, or nil
+    /// when they do not all lie in the mapping.
+    Read,
+    /// `__iobuf_write__(address, offset, string)`: whether it was written.
+    Write,
+    /// `__iobuf_fill__(address, offset, length, byte)`: whether it was.
+    Fill,
+    /// `__iobuf_move__(address, from, to, length)`: a copy inside one
+    /// mapping, the ranges allowed to overlap; whether it was made.
+    Move,
+    /// `__iobuf_page_size__`: `sysconf(_SC_PAGESIZE)`.
+    PageSize,
+}
+
 /// Which FFI primitive. See `ffi.rs` for the calls and `interp.rs`,
 /// `ffi_native`, for what each takes and answers. An address is an Integer,
 /// signed as `fiddle`'s `PTR2NUM` makes it; a value crosses as an 8-byte
@@ -1264,6 +1294,10 @@ pub enum StrOp {
     /// `(byte_start, byte_len, string)` → the receiver, with those bytes
     /// replaced by the string's: every in-place change is one of these.
     Splice,
+    /// `(locked)` → the receiver, locked (`rb_str_locktmp`) when `locked`
+    /// is true and unlocked (`rb_str_unlocktmp`) when it is false; nil asks
+    /// whether it is locked (#797). See [`crate::heap::TMPLOCK`].
+    LockTmp,
     /// `(index)` → the byte there, or nil past either end.
     GetByte,
     /// `(index, byte)` → the byte, written; the index is already checked.
