@@ -6316,7 +6316,7 @@ fn splat_in_place(
             values.push(value);
         } else if value != Value::NIL {
             values.extend_from_slice(
-                array_slice_of(scope, value).expect("splatted_argc read it as an Array"),
+                array_elements_of(scope, value).expect("splatted_argc read it as an Array"),
             );
         }
     }
@@ -11049,10 +11049,28 @@ fn array_slice_of<'s>(scope: &'s HandleScope<'_>, value: Value) -> Option<&'s [V
     if value.is_immediate() {
         return None;
     }
-    let class = known_class_of(scope, value)?;
-    if scope.classes().repr(class) != Some(Builtin::Array) {
-        return None;
+    // An `Array` itself, the class nearly every one is, by its header alone:
+    // one compare, where the class's id goes through the table of
+    // remembered ones and then its representation through the class table
+    // (#751). A class object names one class for the life of the heap.
+    if scope.class_object_of(value) != Some(scope.class_object(Builtin::Array.id())) {
+        let class = known_class_of(scope, value)?;
+        if scope.classes().repr(class) != Some(Builtin::Array) {
+            return None;
+        }
     }
+    array_elements_of(scope, value)
+}
+
+/// The live elements of `value`, an object of `Array`'s representation —
+/// [`array_slice_of`] has said so, and nothing has run since that could
+/// change it — read where they stand, as `array_slice_of` reads them,
+/// without asking about its class again. `None` for an object that does
+/// not hold an Array's two slots.
+///
+/// Under [`HandleScope::slots_of`]'s rule, as `array_slice_of` is.
+#[inline]
+fn array_elements_of<'s>(scope: &'s HandleScope<'_>, value: Value) -> Option<&'s [Value]> {
     let [storage, packed] = scope.slots_of::<{ ARRAY_SLOTS as usize }>(value)?;
     let packed = packed.as_fixnum()?;
     let head = usize::try_from(packed >> ARRAY_LENGTH_BITS).ok()?;
@@ -12927,40 +12945,38 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
 /// A new `Array` of `elements`, which must be rooted, as anything held
 /// across an allocation must.
 ///
-/// Both cells are written once, the storage straight from `elements`, with
-/// the room `array_reserve` gave it: [`ARRAY_MIN_CAPACITY`], doubled until
-/// the elements fit. The same bytes as before, so a collection comes when it
-/// came. The storage is made first, so that the `Array` is the newer of the
-/// two cells.
+/// Both cells are made after one threshold check and written once, the
+/// storage straight from `elements`, under one handle, the Array's
+/// ([`HandleScope::alloc_with_storage`]). The storage is exactly as long as
+/// the elements, as CRuby's `rb_ary_new_from_values` makes it: a push past
+/// it grows by `array_make_room`'s doubling, as a push past any storage
+/// does. For a short literal that puts both cells in one size class, taken
+/// one after the other from its free list, which runs forwards through a
+/// block: as a rule the elements are in the cell before the Array's, rather
+/// than in another size class's blocks (#751). The storage is made first,
+/// so that the `Array` is the newer of the two cells.
 ///
-/// ponytail: storage exactly as long as a literal, CRuby's
-/// `rb_ary_new_from_values`, was 8% faster on yjit-bench `binarytrees`, but
-/// it moves where the core library's boot places every later object, and so
-/// which class objects share an entry of the heap's remembered class ids:
-/// `Thread` and `Fiber` came to, and `Mutex#lock` read `@__id__` twice a
-/// call. Worth taking once that table cannot be made to collide by layout.
+/// That moves where boot places every later object, and so which class
+/// objects share a set of the heap's remembered class ids, which is why
+/// those are two to a set (see `class_ids_set` in `heap.rs`): with one, it
+/// put a program's `main` and `Array` on one entry in yjit-bench
+/// `binarytrees`, and every tree node sent a call the general way.
 fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
     if elements.is_empty() {
         let handle = empty_array(scope);
         return scope.get(handle);
     }
-    let mut capacity = ARRAY_MIN_CAPACITY as usize;
-    while capacity < elements.len() {
-        capacity *= 2;
-    }
-    let capacity = u32::try_from(capacity).expect("an Array storage under 2^32 slots");
-    let storage = scope.alloc_slots(None, elements, capacity);
-    let class = scope.class_object(Builtin::Array.id());
-    let class = scope.root(class);
+    let capacity = u32::try_from(elements.len()).expect("an Array storage under 2^32 slots");
     let length = i64::try_from(elements.len())
         .ok()
         .filter(|&length| length <= ARRAY_LENGTH_MASK)
         .and_then(Value::fixnum)
         .unwrap_or_else(|| array_window_overflow(0, elements.len()));
-    let mut cell = [Value::NIL; ARRAY_SLOTS as usize];
-    cell[ARRAY_STORAGE] = scope.get(storage);
-    cell[ARRAY_LENGTH] = length;
-    let handle = scope.alloc_slots(Some(class), &cell, ARRAY_SLOTS);
+    // The storage is the `Array`'s first slot, `ARRAY_STORAGE`, and its
+    // length the one after it; both cells under one handle, the Array's
+    // (#751).
+    const _: () = assert!(ARRAY_STORAGE == 0 && ARRAY_LENGTH == 1 && ARRAY_SLOTS == 2);
+    let handle = scope.alloc_with_storage(Builtin::Array.id(), &[length], elements, capacity);
     scope.get(handle)
 }
 
@@ -20427,6 +20443,23 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
     1
 }
 
+/// Whether `value` is an `Array` — a subclass's too — whose class is
+/// remembered (see [`known_class_of`]): what [`calls_loop`]'s `SplatArray`
+/// leaves on the stack as it is, as [`splat_sends_to_a`] says `run`'s arm
+/// would. `false` for an immediate, and for an object whose class is not
+/// remembered, which `run` then decides. Out of line, so that the call loop
+/// keeps its registers.
+#[inline(never)]
+fn splats_as_array(scope: &HandleScope<'_>, value: Value) -> bool {
+    if value.is_immediate() {
+        return false;
+    }
+    // An `Array` itself by its header, as `array_slice_of` asks first.
+    scope.class_object_of(value) == Some(scope.class_object(Builtin::Array.id()))
+        || known_class_of(scope, value)
+            .is_some_and(|class| scope.classes().repr(class) == Some(Builtin::Array))
+}
+
 /// The tail of [`light_step`]'s `BinOp` for an immediate answer `value` in
 /// `more_stretch`: the `SetLocal` or conditional jump right after it run
 /// with it, as for a fixnum, or `value` pushed. Answers how many
@@ -21287,6 +21320,20 @@ fn calls_loop<const MORE: bool>(
                     if scope.has_pending_finalizers() {
                         break false;
                     }
+                }
+                // `*value` of `nil` or of an `Array`, each of which spreads as
+                // it is without asking Ruby (see `splat_sends_to_a`): nothing to
+                // do, so `item_check(*left)` stays in the call loop rather than
+                // going back to `run` for an instruction that changes nothing
+                // (#751). Anything else may send `to_a`, and is `run`'s. Here
+                // rather than in `light_step`, whose every loop a further arm
+                // there measurably slowed.
+                Insn::SplatArray => {
+                    let value = *stack.last().expect("a splat to convert");
+                    if value != Value::NIL && !splats_as_array(scope, value) {
+                        break false;
+                    }
+                    at += 1;
                 }
                 _ => break false,
             }
@@ -30881,6 +30928,18 @@ mod tests {
         assert_eq!(array_slice_of(&scope, pair), Some(&[int(1), int(2)][..]));
         assert_eq!(array_slice_of(&scope, empty), Some(&[][..]));
         assert_eq!(array_slice_of(&scope, int(3)), None);
+        // An `Array` itself is known by its header, with nothing remembered:
+        // a collection forgets the remembered class ids. So is what the call
+        // loop's `SplatArray` leaves as it is, and the elements read again
+        // without asking about the class.
+        scope.collect();
+        assert_eq!(array_slice_of(&scope, pair), Some(&[int(1), int(2)][..]));
+        assert!(splats_as_array(&scope, pair) && splats_as_array(&scope, empty));
+        assert!(!splats_as_array(&scope, int(3)) && !splats_as_array(&scope, Value::NIL));
+        assert_eq!(array_elements_of(&scope, pair), Some(&[int(1), int(2)][..]));
+        let string = string_new(&mut scope, "s");
+        assert!(!splats_as_array(&scope, string));
+        assert_eq!(array_slice_of(&scope, string), None);
 
         let site = |argc: u16, splats: Vec<u16>| CallSite {
             name: 0,

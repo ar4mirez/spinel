@@ -2932,6 +2932,10 @@ def z751(o) = o.nil?; r = [z751(nil), z751([1]), z751(nil), z751(Object.new), z7
 class O751; def nil? = :mine; end; def y751(o) = o.nil?; [y751(O751.new), y751(1), y751(O751.new), y751(nil), y751(1)]  #=> [:mine, false, :mine, true, false]
 # Array literals made between calls, and splatted back out, under GC.stress.
 def b751(d) = d == 0 ? [nil, nil] : [b751(d - 1), b751(d - 1)]; def e751(l, r) = l.nil? ? 1 : 1 + e751(*l) + e751(*r); GC.stress = true; t = b751(4); n = e751(*t); GC.stress = false; [n, t.flatten.size, e751(*b751(6))]  #=> [31, 32, 127]
+# A splat of an Array or nil in a loop is left as it is where it is written,
+# without asking `to_a` — not an Array's singleton one, nor a subclass's — and
+# an object that has a `to_a` still asks it, however warm the site.
+def s751(*a) = a; class T751; def to_a = [:t]; end; class B751 < Array; def to_a = [:no]; end; a = [1, 2]; def a.to_a = [:single]; r = []; 3.times { [[1, 2], T751.new, nil, a, B751[3], T751.new, [4]].each { |x| r << s751(0, *x) } }; r.uniq  #=> [[0, 1, 2], [0, :t], [0], [0, 3], [0, 4]]
 # ------------------------------- the call loop's own instructions and returns (#746, #750)
 # An if or unless whose value nothing reads compiles to its test and its arms
 # alone; a missing arm pushes nothing, and `x unless c` is one jump.
