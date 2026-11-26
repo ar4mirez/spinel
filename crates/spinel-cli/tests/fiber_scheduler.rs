@@ -55,9 +55,13 @@ fn stdout_of(output: &Output) -> String {
 #[test]
 fn the_io_hooks_get_buffers_over_what_is_read_and_written() {
     let output = run("io_hooks.rb", &[]);
+    // The hook's result is `-EAGAIN`, whose number is the platform's: 11 on
+    // Linux, where the expected output was recorded, 35 on macOS.
+    let eagain = libc::EAGAIN;
     assert_eq!(
         stdout_of(&output),
-        "[:scheduled]\n\
+        format!(
+            "[:scheduled]\n\
          [:write, 5]\n\
          [:buffer_write, 3]\n\
          [:readpartial, \"hello\"]\n\
@@ -66,7 +70,7 @@ fn the_io_hooks_get_buffers_over_what_is_read_and_written() {
          [:current, true, nil]\n\
          [:fiber]\n\
          [:io_read, IO, [IO::Buffer, 5, :locked?], 0, 0]\n\
-         [:read, -11]\n\
+         [:read, -{eagain}]\n\
          [:io_wait, IO, 1, nil]\n\
          [:fiber]\n\
          [:kernel_sleep, 0.01]\n\
@@ -80,8 +84,9 @@ fn the_io_hooks_get_buffers_over_what_is_read_and_written() {
          [:io_read, IO, [IO::Buffer, 3, :internal?], 3, 0]\n\
          [:read, 3]\n\
          [:io_read, IO, [IO::Buffer, 10, :locked?], 0, 0]\n\
-         [:read, -11]\n\
+         [:read, -{eagain}]\n\
          nil\n"
+        )
     );
 }
 
