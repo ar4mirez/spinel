@@ -595,9 +595,15 @@ pub struct Heap {
     /// The events some enabled `TracePoint` of this Ractor waits for (#127),
     /// as the bits `interp.rs`'s `TRACE_LINE` and the rest name: the union
     /// `core/trace_point.rb` keeps current through `__trace_events__`. Zero
-    /// while none is enabled, which is what the interpreter loop reads to
-    /// leave its fast paths and look for events at every instruction.
+    /// while none is enabled. What the interpreter loop reads to look for
+    /// events at every instruction, while it has `:line` or `:return`, and
+    /// to look for them where a frame is pushed otherwise (#908).
     trace_events: u8,
+    /// How many instructions the interpreter loop has sent the slow way, past
+    /// its limit, rather than on to its fast paths: what a test reads to see
+    /// which `TracePoint` events step every instruction (#908).
+    #[cfg(test)]
+    slow_steps: u64,
     /// Objects allocated since the interpreter last stamped them with where
     /// it was. The allocator cannot see the frame stack, so it leaves the
     /// address here and the loop, which can, files it under the instruction
@@ -1036,6 +1042,8 @@ impl Heap {
             pending_finalizers: Vec::new(),
             allocation_tracing: 0,
             trace_events: 0,
+            #[cfg(test)]
+            slow_steps: 0,
             fresh_allocations: Vec::new(),
             allocation_sites: HashMap::new(),
         }
@@ -3231,6 +3239,13 @@ impl<'h> HandleScope<'h> {
     /// Set what [`HandleScope::trace_events`] answers.
     pub(crate) fn set_trace_events(&mut self, events: u8) {
         self.heap.trace_events = events;
+    }
+
+    /// See `Heap::slow_steps`: counted by the interpreter loop, read by
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn slow_steps(&mut self) -> &mut u64 {
+        &mut self.heap.slow_steps
     }
 
     /// Whether objects allocated since the loop last looked are waiting to

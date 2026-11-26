@@ -446,9 +446,10 @@ struct Call {
     /// a method's body, which has `:call` and `:return` events,
     /// [`FRAME_CLASS`] for a `class` or `module` body, which has `:class`,
     /// [`FRAME_ENTRY`] while the `:call` or `:class` it was pushed with,
-    /// under an enabled `TracePoint`, has not fired, and [`FRAME_BEFORE`]
-    /// for a hook's frame pushed before its caller's instruction ran. One byte, in what the
-    /// frame's other bytes leave of its 128.
+    /// under an enabled `TracePoint`, has not fired, [`FRAME_BEFORE`] for a
+    /// hook's frame pushed before its caller's instruction ran, and
+    /// [`FRAME_HOOK`] for any hook's frame. One byte, in what the frame's
+    /// other bytes leave of its 128.
     trace: u8,
     /// What few frames hold: see [`Rare`]. `None` until one does.
     rare: Option<Box<Rare>>,
@@ -2683,15 +2684,15 @@ fn run<'h>(
     } else {
         0
     };
-    // An enabled `TracePoint` (#127) pins the limit the same way, so that
-    // every instruction goes through `tracepoint_step` first, and keeps the
-    // loop off its fast paths: see "TracePoint" below. `traced_last` is the
-    // frame and `pc` of the last instruction it stepped.
-    let mut tp_floor: u64 = if scope.trace_events() != 0 {
-        u64::MAX
-    } else {
-        0
-    };
+    // An enabled `TracePoint` (#127) that waits for `:line` or `:return`
+    // pins the limit the same way, so that every instruction goes through
+    // `tracepoint_step` first, and keeps the loop off its fast paths: see
+    // "TracePoint" below. `traced_last` is the frame and `pc` of the last
+    // instruction it stepped. One that waits for `:call` keeps the loop off
+    // the fast paths that push a frame without coming back to the top of
+    // the loop, `tp_calls`, where the frame's `:call` fires (#908).
+    let mut tp_floor: u64 = trace_floor_for(scope);
+    let mut tp_calls = scope.trace_events() & TRACE_CALL != 0;
     let mut traced_last: (u64, usize) = (0, 0);
     let mut limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
 
@@ -2735,6 +2736,54 @@ fn run<'h>(
                 }
             };
         }
+        // After an unwind, while a `TracePoint` is enabled: the frame-change
+        // block below runs before the next instruction, whether or not the
+        // count of frames moved, so that it fires an event the unwinder
+        // parked on the frame it stopped at, and sees the events a loop
+        // below this one may have enabled (#908).
+        macro_rules! unwound {
+            () => {
+                if scope.trace_events() != 0 {
+                    seen_frames = usize::MAX;
+                }
+            };
+        }
+        // What `tracepoint_step` said, carried out: the instruction runs,
+        // or the hook frame it pushed does, or the unwind goes on.
+        macro_rules! traced {
+            ($traced:expr) => {
+                let unwind = match $traced {
+                    Ok(Traced::Run) => None,
+                    Ok(Traced::Pushed) => {
+                        reload!();
+                        continue;
+                    }
+                    Ok(Traced::Resume(unwind)) => Some(unwind),
+                    Err(Error::Raise { class, message }) => {
+                        Some(Unwind::Exception(exception_new(scope, class, &message)))
+                    }
+                    Err(other) => {
+                        seen_frames = usize::MAX;
+                        Some(refuse(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            &mut boundaries,
+                            other,
+                        )?)
+                    }
+                };
+                if let Some(unwind) = unwind {
+                    if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    {
+                        break value;
+                    }
+                    unwound!();
+                    reload!();
+                    continue;
+                }
+            };
+        }
         reload!();
         Ok(loop {
             // What the last instruction left on the stack is rooted before the
@@ -2766,6 +2815,23 @@ fn run<'h>(
                     tp_floor = tp_floor.max(trace_floor_for(scope));
                     reload!();
                     continue;
+                }
+                // A `:call` or a `:class` the frame now on top was pushed
+                // with, or an event the unwinder parked on it, fires here,
+                // before its next instruction, when no `TracePoint` waits
+                // for an event that steps every instruction — which fires it
+                // otherwise (#908). Before anything below can push a frame
+                // above it: the fast paths return into a frame without
+                // coming back here.
+                if trace_floor_for(scope) == 0 && trace_owed_on_top(scope, &frames) {
+                    traced!(tracepoint_step(
+                        scope,
+                        &mut stack,
+                        &mut frames,
+                        proc_class,
+                        &mut ids,
+                        &mut traced_last,
+                    ));
                 }
                 // A call or a return (#36). `GC.start` collects here rather
                 // than inside its native, once the handles taken for
@@ -2818,6 +2884,7 @@ fn run<'h>(
                     tp_floor = wanted;
                     traced_last = (0, 0);
                 }
+                tp_calls = scope.trace_events() & TRACE_CALL != 0;
                 // With no boundary anywhere and none to start, there is
                 // nothing for the refresh to find: its answer is zero.
                 deadline = if boundaries.is_empty()
@@ -2834,6 +2901,10 @@ fn run<'h>(
             }
             budget = budget.saturating_sub(1);
             if budget <= limit {
+                #[cfg(test)]
+                {
+                    *scope.slow_steps() += 1;
+                }
                 sync_out!();
                 if trace_floor != 0 && !trace_step(scope, &frames, &mut traced_top) {
                     trace_floor = 0;
@@ -2932,44 +3003,14 @@ fn run<'h>(
                 // An event this instruction owes an enabled `TracePoint`
                 // (#127) fires before it runs, as a hook frame on top.
                 if tp_floor != 0 {
-                    let traced = tracepoint_step(
+                    traced!(tracepoint_step(
                         scope,
                         &mut stack,
                         &mut frames,
                         proc_class,
                         &mut ids,
                         &mut traced_last,
-                    );
-                    let unwind = match traced {
-                        Ok(Traced::Run) => None,
-                        Ok(Traced::Pushed) => {
-                            reload!();
-                            continue;
-                        }
-                        Ok(Traced::Resume(unwind)) => Some(unwind),
-                        Err(Error::Raise { class, message }) => {
-                            Some(Unwind::Exception(exception_new(scope, class, &message)))
-                        }
-                        Err(other) => {
-                            seen_frames = usize::MAX;
-                            Some(refuse(
-                                scope,
-                                &mut stack,
-                                &mut frames,
-                                &mut boundaries,
-                                other,
-                            )?)
-                        }
-                    };
-                    if let Some(unwind) = unwind {
-                        if let Some(value) =
-                            unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
-                        {
-                            break value;
-                        }
-                        reload!();
-                        continue;
-                    }
+                    ));
                 }
                 reload!();
             }
@@ -3043,6 +3084,7 @@ fn run<'h>(
                     && boundaries.is_empty()
                     && trace_floor == 0
                     && tp_floor == 0
+                    && !tp_calls
                     && !scope.collection_requested()
                     && !scope.tracing_allocations()
                     && !scope.has_pending_finalizers()
@@ -3072,9 +3114,11 @@ fn run<'h>(
 
             // The rest of the instructions answered before the closure: the
             // ones that change the frames, so cannot run light. Not while a
-            // `TracePoint` is enabled (#127): a call, a yield or a return
+            // `TracePoint` waits for `:line` or `:return` (#127): a return
             // here takes no frame through `tracepoint_step`'s events, and the
-            // closure's arms do the same work the general way.
+            // closure's arms do the same work the general way. Nor a call to
+            // a method while one waits for `:call` (#908): the frame it
+            // pushes is not marked for one.
             if tp_floor == 0 {
                 match insn {
                     // The call most sends are — see `send_simple`. Anything it
@@ -3110,6 +3154,7 @@ fn run<'h>(
                             }
                             _ => {
                                 if !declined
+                                    && !tp_calls
                                     && send_simple(scope, &mut stack, &mut frames, index, &mut ids)
                                         .is_some()
                                 {
@@ -3118,7 +3163,7 @@ fn run<'h>(
                                 }
                             }
                         }
-                        if !declined && scope.call_caches().has_behind(slot) {
+                        if !declined && !tp_calls && scope.call_caches().has_behind(slot) {
                             match send_promoted(scope, &mut stack, &mut frames, index, &mut ids) {
                                 Promoted::No => {}
                                 Promoted::Answered => continue,
@@ -4993,8 +5038,6 @@ fn run<'h>(
             {
                 match trace_raise(scope, &mut stack, &mut frames, proc_class, &mut ids, unwind) {
                     Ok(Traced::Pushed) => {
-                        tp_floor = u64::MAX;
-                        limit = limit.max(tp_floor);
                         reload!();
                         continue;
                     }
@@ -5014,14 +5057,11 @@ fn run<'h>(
             if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
                 break value;
             }
-            // The unwinder parks a method's `:return` for this loop to fire
-            // when a `TracePoint` waits for one, which this loop may not have
-            // seen enabled yet (#127).
-            if tp_floor == 0 && scope.trace_events() != 0 {
-                tp_floor = u64::MAX;
-                traced_last = (0, 0);
-                limit = limit.max(tp_floor);
-            }
+            // The unwinder parks a method's `:return`, or a `:raise` the core
+            // library started, for this loop to fire when a `TracePoint`
+            // waits for one, which this loop may not have seen enabled yet
+            // (#127).
+            unwound!();
             reload!();
         })
     })();
@@ -21193,7 +21233,11 @@ fn calls_loop<const MORE: bool>(
             frames[top].pc = at + 1;
             state.entered += 1;
             at = 0;
-        } else if matches!(insn, Insn::Return) && top > 0 && returns_in_place(frame, at + 1) {
+        } else if matches!(insn, Insn::Return)
+            && top > 0
+            && returns_in_place(frame, at + 1)
+            && leaves_untraced(frames, top)
+        {
             leave_here(scope, stack, frames, false);
             state.left |= state.entered == 0;
             state.entered = state.entered.saturating_sub(1);
@@ -21201,7 +21245,9 @@ fn calls_loop<const MORE: bool>(
         } else {
             match insn {
                 // `run`'s own arms for these, under its conditions.
-                Insn::Leave if top > 0 && !frame.raises_receiver => {
+                Insn::Leave
+                    if top > 0 && !frame.raises_receiver && leaves_untraced(frames, top) =>
+                {
                     leave_here(scope, stack, frames, true);
                     state.left |= state.entered == 0;
                     state.entered = state.entered.saturating_sub(1);
@@ -21283,6 +21329,17 @@ fn calls_loop<const MORE: bool>(
     state.ran = ran;
     state.masks = masks;
     switched
+}
+
+/// Whether [`run_calls`] may return from the frame at `top` and go on in
+/// its caller without [`run`]'s loop seeing the return (#908): not from a
+/// `TracePoint` hook's frame, whose caller may have an unwind parked on it
+/// until the hook is done, nor into a frame whose `:call` or `:class` has
+/// not fired yet — a hook a class body owes, `inherited`, runs above it
+/// first. Neither is ever so without an enabled `TracePoint`.
+#[inline(always)]
+fn leaves_untraced(frames: &[Call], top: usize) -> bool {
+    (frames[top].trace & FRAME_HOOK) | (frames[top - 1].trace & FRAME_ENTRY) == 0
 }
 
 /// How [`run_calls`] stopped.
@@ -24059,13 +24116,26 @@ fn heap_repr(scope: &mut HandleScope<'_>, object: Value) -> Option<Builtin> {
 //
 // `core/trace_point.rb` keeps this Ractor's enabled `TracePoint`s and tells
 // the heap which events any of them waits for (`Kernel#__trace_events__`).
-// While that is nonzero the loop leaves every path that could carry it past
-// an event — the light stretches, `run_calls`, the inline sends, yields and
-// returns before its closure, a superinstruction's run — and goes through
+// While they include `:line` or `:return`, which can come at any
+// instruction, the loop leaves every path that could carry it past an event
+// — the light stretches, `run_calls`, the inline sends, yields and returns
+// before its closure, a superinstruction's run — and goes through
 // `tracepoint_step` before every instruction. That is the interpreter's
 // deoptimisation: bytecode is shared between Ractors and never rewritten, as
 // CRuby rewrites its instructions to their `trace_` forms, so what changes is
 // how the loop runs it, and it changes back when the last one is disabled.
+//
+// `:call`, `:class` and `:raise` need none of it (#908), so a `TracePoint`
+// kept enabled for the life of a program — Zeitwerk's `:class`, an error
+// tracker's `:raise` — costs the frames it fires in and not the rest. A
+// method's or a class body's frame is pushed marked [`FRAME_ENTRY`], and
+// the loop's frame-change block, which runs between the push and the
+// frame's first instruction, fires it there; a `:raise` fires where the
+// exception starts, which is the loop's own. While a `TracePoint` waits for
+// `:call`, the fast paths that push a method's frame without the loop seeing
+// it are off, since they do not mark it; and `run_calls`, which returns into
+// a caller without the loop seeing it either, stops at a return into a frame
+// still marked, or out of a hook's frame.
 //
 // An event is a call to `TracePoint.__fire__` pushed on top of the frame it
 // happened in, as a finalizer's or a signal handler's is, so the hook runs in
@@ -24093,6 +24163,13 @@ const FRAME_ENTRY: u8 = 4;
 /// `:class` before the instruction at its caller's `pc` ran, so the caller
 /// is at that `pc` rather than past it.
 const FRAME_BEFORE: u8 = 8;
+/// [`Call::trace`]: a hook's frame, the call to `TracePoint.__fire__`, whose
+/// caller may have an unwind parked until it returns: see
+/// [`leaves_untraced`].
+const FRAME_HOOK: u8 = 16;
+/// The events that can come at any instruction, so that the loop steps
+/// every one while a `TracePoint` waits for one: see [`trace_floor_for`].
+const TRACE_STEPPED: u8 = TRACE_LINE | TRACE_RETURN;
 
 /// The instruction the frame at `at` is at: the one before its `pc`, which
 /// has moved past it, unless the frame above is a hook pushed before it ran.
@@ -24109,13 +24186,35 @@ fn frame_insn(frames: &[Call], at: usize) -> usize {
 }
 
 /// What the loop pins its limit at for `TracePoint`s: the maximum while one
-/// is enabled, which sends every instruction through [`tracepoint_step`].
+/// waits for an event of [`TRACE_STEPPED`], which sends every instruction
+/// through [`tracepoint_step`], and zero otherwise, which leaves the fast
+/// paths on (#908).
 fn trace_floor_for(scope: &HandleScope<'_>) -> u64 {
-    if scope.trace_events() == 0 {
+    trace_floor_of(scope.trace_events())
+}
+
+/// [`trace_floor_for`] for the events `events`.
+const fn trace_floor_of(events: u8) -> u64 {
+    if events & TRACE_STEPPED == 0 {
         0
     } else {
         u64::MAX
     }
+}
+
+/// Whether the frame on top owes an enabled `TracePoint` an event before its
+/// next instruction: the `:call` or `:class` it was pushed with, or one the
+/// unwinder parked on it. What the loop's frame-change block fires when it
+/// is not stepping every instruction (#908).
+fn trace_owed_on_top(scope: &HandleScope<'_>, frames: &[Call]) -> bool {
+    scope.trace_events() != 0
+        && frames.last().is_some_and(|frame| {
+            frame.trace & FRAME_ENTRY != 0
+                || frame
+                    .rare
+                    .as_deref()
+                    .is_some_and(|rare| rare.trace_owed.is_some())
+        })
 }
 
 /// [`FRAME_ENTRY`] for a frame pushed now, when a `TracePoint` waits for its
@@ -24190,7 +24289,9 @@ struct TraceEvent {
 }
 
 /// Before the top frame's instruction at its `pc` runs, while a
-/// `TracePoint` is enabled: fire what is owed there, in CRuby's order — an
+/// `TracePoint` waits for an event of [`TRACE_STEPPED`], or, while one waits
+/// only for the others, before the first of a frame that owes it one (see
+/// [`trace_owed_on_top`]): fire what is owed there, in CRuby's order — an
 /// event the unwinder parked, the frame's `:call` or `:class`, a `:line`,
 /// then a method's `:return` before its `Leave` — one at a time, each a hook
 /// frame the loop runs before coming back here. `last` is the frame and `pc`
@@ -24513,6 +24614,7 @@ fn trace_push<'h>(
         return Ok(Traced::Run);
     }
     frames[depth].set_shown(Shown::Hidden);
+    frames[depth].trace |= FRAME_HOOK;
     scope.set_errinfo(Value::NIL);
     Ok(Traced::Pushed)
 }
@@ -31849,5 +31951,120 @@ mod tests {
                 3 * rounds
             )
         );
+    }
+
+    /// Which `TracePoint` events step every instruction (#908): `:line` and
+    /// `:return`, which can come at any instruction, send each one the slow
+    /// way, past the loop's limit, and off its superinstructions and light
+    /// stretches; `:class`, `:raise` and `:call`, which come where a frame is
+    /// pushed or an exception starts, leave them on, as no `TracePoint` does.
+    /// The same fused loop under each, calling a method each turn, with the
+    /// same answer.
+    #[test]
+    fn only_line_and_return_step_every_instruction() {
+        use crate::bytecode::{BlockRef, CallSite, fuse};
+        let rounds: i64 = if cfg!(miri) { 4 } else { 1000 };
+        // def f(x) = x + 1
+        let f = Arc::new(Iseq {
+            name: "f".into(),
+            insns: vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::Leave,
+            ],
+            locals: vec!["x".into()],
+            max_stack: 2,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // s = 0; i = 0; while i < rounds; s = s + f(i); i += 1; end; s
+        let mut insns = vec![
+            Insn::PushInt(0),
+            Insn::SetLocal(0, 0),
+            Insn::PushInt(0),
+            Insn::SetLocal(1, 0),
+            Insn::GetLocal(1, 0),
+            Insn::PushInt(rounds),
+            Insn::BinOp(BinOp::Lt),
+            Insn::JumpUnless(11),
+            Insn::GetLocal(0, 0),
+            Insn::PushSelf,
+            Insn::GetLocal(1, 0),
+            Insn::Send(0),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(0, 0),
+            Insn::GetLocal(1, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(1, 0),
+            Insn::Jump(-15),
+            Insn::GetLocal(0, 0),
+            Insn::Leave,
+        ];
+        fuse(&mut insns);
+        let program = Iseq {
+            name: "<test>".into(),
+            insns,
+            symbols: vec!["f".into()],
+            locals: vec!["s".into(), "i".into()],
+            call_sites: vec![CallSite {
+                name: 0,
+                argc: 1,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: true,
+                variable_call: false,
+                kwsplat: false,
+            }],
+            max_stack: 4,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let name = crate::shared::symbols::intern("f");
+        let body = scope
+            .definitions_mut()
+            .intern_iseq(&f, Arc::as_ptr(&f) as usize);
+        scope
+            .classes_mut()
+            .define_method(Builtin::Object.id(), name, body);
+        // No `TracePoint` class here, so an event that comes fires nothing:
+        // what is measured is only how the loop runs.
+        let mut slow = |events: u8| {
+            scope.set_trace_events(events);
+            *scope.slow_steps() = 0;
+            let mut frame = Frame::new(2);
+            let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+            scope.set_trace_events(0);
+            let sum = rounds * (rounds + 1) / 2;
+            assert_eq!(inspect(&mut scope, value), sum.to_string(), "{events}");
+            *scope.slow_steps()
+        };
+        // Every turn runs more than ten instructions, each one stepped.
+        let stepped = 10 * rounds as u64;
+        // A turn check now and then, and nothing else.
+        let fast = rounds as u64 / 10 + 1;
+        assert!(slow(0) <= fast, "untraced");
+        for events in [
+            TRACE_CLASS,
+            TRACE_RAISE,
+            TRACE_CALL,
+            TRACE_CLASS | TRACE_RAISE,
+        ] {
+            let steps = slow(events);
+            assert!(steps <= fast, "{events}: {steps} stepped");
+        }
+        for events in [TRACE_LINE, TRACE_RETURN, TRACE_CLASS | TRACE_LINE] {
+            let steps = slow(events);
+            assert!(steps >= stepped, "{events}: {steps} stepped");
+        }
     }
 }
