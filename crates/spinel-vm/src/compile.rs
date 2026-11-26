@@ -107,6 +107,20 @@ pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
     file(program, name, false, false)
 }
 
+/// [`program`], for Spinel's own core library (`core/*.rb`): `x.nil?` with
+/// no arguments and no block is the identity test CRuby's C makes with
+/// `NIL_P`, not a send. The core library stands in for CRuby's C, which
+/// never asks a Ruby-level `nil?`, so a program that redefines `nil?`, makes
+/// it private or removes it changes nothing in, say, how `rescue` builds and
+/// matches a `NoMethodError` (#924).
+pub fn core_program(program: &Program) -> Result<Iseq, Unsupported> {
+    let mut compiler = Compiler::new("<main>", &program.locals);
+    compiler.core = true;
+    compiler.source = Some(Arc::clone(&program.source));
+    compiler.statements(&hoist_begin(&program.body), true)?;
+    Ok(compiler.finish())
+}
+
 /// A program's own file: [`program_as`], with a string literal the file says
 /// nothing about chilled (#263) — or frozen when `frozen_string_literal` is
 /// `Some(true)`, as `--enable=frozen-string-literal` asks, and plain when it
@@ -413,6 +427,9 @@ struct Compiler {
     /// `frozen_string_literal`, and not for Spinel's `core/*.rb`, whose
     /// literals stand in for CRuby's C and never warn.
     chill: bool,
+    /// Compiling Spinel's `core/*.rb` (see [`core_program`]): `x.nil?` is an
+    /// identity test rather than a send.
+    core: bool,
 }
 
 /// A method's parameters as a bare `super` inside an `eval` string forwards
@@ -524,6 +541,7 @@ impl Compiler {
             eval_in_block: false,
             frozen_default: false,
             chill: false,
+            core: false,
         }
     }
 
@@ -564,6 +582,7 @@ impl Compiler {
         compiler.eval_in_block = parent.eval_in_block && !barrier;
         compiler.frozen_default = parent.frozen_default;
         compiler.chill = parent.chill;
+        compiler.core = parent.core;
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
@@ -4247,6 +4266,16 @@ impl Compiler {
         if self.try_operator(call)? {
             return Ok(());
         }
+        if self.core
+            && &*call.name == "nil?"
+            && call.args.is_empty()
+            && call.block.is_none()
+            && let Some(receiver) = &call.receiver
+        {
+            self.expr(receiver)?;
+            self.nil_test();
+            return Ok(());
+        }
 
         // Receiver first: Ruby evaluates it before the arguments.
         match &call.receiver {
@@ -4282,6 +4311,21 @@ impl Compiler {
         }
         self.emit(Insn::Send(site));
         Ok(())
+    }
+
+    /// The core library's `x.nil?`, with `x` on the stack: `true` for `nil`
+    /// and `false` for anything else, by identity, as CRuby's `NIL_P` asks
+    /// it. No send, so neither a redefined `nil?` nor its visibility reaches
+    /// it (#924).
+    fn nil_test(&mut self) {
+        let nil = self.emit_jump(Insn::JumpIfNilKeep);
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushFalse);
+        let done = self.emit_jump(Insn::Jump);
+        self.patch_here(nil);
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushTrue);
+        self.patch_here(done);
     }
 
     /// `a&.b`: the send, jumped around when the receiver is `nil`.

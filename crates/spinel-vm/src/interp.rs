@@ -6602,9 +6602,11 @@ fn native_light(
                     && known_class_of(scope, other).is_some_and(|class| is_string(scope, class)));
             (theirs && append_plain(scope, receiver, other, may_allocate)).then_some(receiver)
         }
-        // `Kernel#nil?`, the general path's answer. Last, so that the forms
-        // before it keep the tests they had.
-        Native::NilP => Some(bool_value(receiver == Value::NIL)),
+        // `Kernel#nil?`, the general path's answer: `false` for every
+        // receiver, `nil` too, as CRuby's `rb_false`. Only `NilClass#nil?`
+        // answers `true`, so `nil` reaches this one only once that is gone
+        // (#923). Last, so that the forms before it keep the tests they had.
+        Native::NilP => Some(Value::FALSE),
         _ => None,
     }
 }
@@ -13744,8 +13746,10 @@ fn native_call<'h>(
             stack.push(bool_value(call.receiver == other));
             Ok(None)
         }
+        // `Kernel#nil?` is CRuby's `rb_false`: `nil` is `true` only through
+        // `NilClass#nil?`, and asks this one after that is removed (#923).
         Native::NilP => {
-            stack.push(bool_value(call.receiver == Value::NIL));
+            stack.push(Value::FALSE);
             Ok(None)
         }
 
@@ -31365,7 +31369,8 @@ mod tests {
     /// site whose entry is `Kernel#nil?`'s for Arrays (#751): `go(x)` calls
     /// `pair(*x)` and `nil_p(x)` asks `x.nil?`, each again once its site is
     /// warm, across a collection, and `nil_p` once more after `NilClass#nil?`
-    /// is redefined. Built by hand for miri, as
+    /// is redefined and again after it is removed (#923). Built by hand for
+    /// miri, as
     /// `a_call_pushes_a_frame_under_miri` is.
     #[test]
     fn a_splat_call_and_nil_p_answer_from_their_plans_under_miri() {
@@ -31508,6 +31513,21 @@ mod tests {
         assert_eq!(
             inspect(&mut scope, value),
             "[[2, 1], [4, 3], [6, 5], false, 7, false, 7, false, 7]"
+        );
+
+        // With `NilClass#nil?` gone, `nil` asks `Kernel#nil?`, which is
+        // `false` for every receiver, as CRuby's `rb_false` (#923).
+        let nil_p_name = crate::shared::symbols::intern("nil?");
+        assert!(
+            scope
+                .classes_mut()
+                .remove_method(Builtin::NilClass.id(), nil_p_name)
+        );
+        scope.classes_mut().take_redefined();
+        let value = eval_in(&mut scope, &mut frame, &caller).expect("should run");
+        assert_eq!(
+            inspect(&mut scope, value),
+            "[[2, 1], [4, 3], [6, 5], false, false, false, false, false, false]"
         );
     }
 

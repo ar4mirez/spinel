@@ -335,3 +335,30 @@ fn superinstructions_leave_the_jumps_where_they_were() {
     assert_eq!(run(&program), run(&unfused));
     assert_eq!(run(&program), "3");
 }
+
+#[test]
+fn the_core_library_asks_nil_p_by_identity_and_a_program_by_a_send() {
+    // `core/*.rb` stands in for CRuby's C, whose `NIL_P` no `nil?` a program
+    // redefines or makes private can reach (#924). A program's own `x.nil?`
+    // stays a send, and so does any other shape of the call in the core.
+    let source = "x = [nil, 1, false]; x.map { |v| v.nil? }";
+    let parsed = spinel_parse::parse(source.as_bytes());
+    let core = compile::core_program(&parsed.program).expect("should compile");
+    let sends = |iseq: &Iseq| {
+        iseq.insns
+            .iter()
+            .chain(iseq.children.iter().flat_map(|child| child.insns.iter()))
+            .filter(|insn| matches!(insn, Insn::Send(_)))
+            .count()
+    };
+    assert_eq!(sends(&core), 1, "only `map` is a send in the core library");
+    assert_eq!(sends(&iseq(source)), 2, "a program sends `nil?` too");
+    let parsed = spinel_parse::parse(b"v = nil; [v.nil?, 1.nil?, false.nil?]");
+    let core = compile::core_program(&parsed.program).expect("should compile");
+    assert_eq!(sends(&core), 0);
+    assert_eq!(run(&core), "[true, false, false]");
+
+    let parsed = spinel_parse::parse(b"x = 1; [x.nil?(), x.nil? { }]");
+    let core = compile::core_program(&parsed.program).expect("should compile");
+    assert_eq!(sends(&core), 1, "a block makes it a send");
+}

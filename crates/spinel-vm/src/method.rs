@@ -262,8 +262,8 @@ pub enum Native {
     /// `Regexp#__name_table__`: each group name and the group it labels, in
     /// group order.
     RegexpNameTable,
-    /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
-    /// specs reach for while checking something else.
+    /// `Kernel#nil?`: `false`, for every receiver, as CRuby's `rb_false`.
+    /// `nil.nil?` is `NilClass#nil?`'s `true`, in `core/nil_class.rb`.
     NilP,
 
     // -- #15's core library. Each one is raw memory or allocation; everything

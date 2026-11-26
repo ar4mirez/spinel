@@ -2955,6 +2955,24 @@ class Rs751; def m(a, b) = :plain; end; module RsR751; refine(Rs751) { def m(a, 
 class Sv751; def m(a, b) = a + b; end; def sv751(o, v) = o.m(*v); o = Sv751.new; r = [sv751(o, [1, 2]), sv751(o, [3, 4])]; class Sv751; def m(a, b) = a * b; end; r << sv751(o, [3, 4]) << sv751(o, [5, 6])  #=> [3, 7, 12, 30]
 def m751(a, b, c) = [a, b, c]; def mm751(x, y) = m751(*x, *y); [mm751([1], [2, 3]), mm751([1, 2], [3]), mm751(nil, [1, 2, 3]), (mm751([1], [2]) rescue $!.message), mm751([4], [5, 6])]  #=> [[1, 2, 3], [1, 2, 3], [1, 2, 3], "wrong number of arguments (given 2, expected 3)", [4, 5, 6]]
 def o751(a, b = :d) = [a, b]; def oo751(v) = o751(*v); [oo751([1]), oo751([1, 2]), oo751([3]), oo751([4, 5])]  #=> [[1, :d], [1, 2], [3, :d], [4, 5]]
+# `Kernel#nil?` is `false` for every receiver, `nil` too, as CRuby's `rb_false`:
+# `nil.nil?` is `true` only through `NilClass#nil?`. Removing that, redefining
+# it, aliasing another body over it or making it private is heard at a site
+# that answered `nil.nil?` before (#923).
+class NilClass; remove_method :nil?; end; [nil.nil?, 1.nil?, Kernel.instance_method(:nil?).bind_call(nil), nil.method(:nil?).owner]  #=> [false, false, false, Kernel]
+[nil.nil?, Kernel.instance_method(:nil?).bind_call(nil), Kernel.instance_method(:nil?).bind_call(1), nil.method(:nil?).owner]  #=> [true, false, false, NilClass]
+def n923(x) = x.nil?; r = [n923([1]), n923(nil), n923([2]), n923(nil)]; class NilClass; remove_method :nil?; end; r << n923(nil) << n923([3]) << n923(nil)  #=> [false, true, false, true, false, false, false]
+def r923(x) = x.nil?; r = [r923([1]), r923(nil), r923([2]), r923(nil)]; class NilClass; def nil? = :mine; end; r << r923(nil) << r923([3]) << r923(nil)  #=> [false, true, false, true, :mine, false, :mine]
+def a923(x) = x.nil?; r = [a923([1]), a923(nil), a923([2])]; class NilClass; alias_method :nil?, :to_a; end; r << a923(nil) << a923([3]) << a923(nil)  #=> [false, true, false, [], false, []]
+def p923(x) = (x.nil? rescue $!.message); r = [p923([1]), p923(nil), p923([2])]; class NilClass; private :nil?; end; r << p923(nil) << p923([3]); class NilClass; public :nil?; end; r << p923(nil)  #=> [false, true, false, "private method 'nil?' called for nil", false, true]
+# The core library asks `x.nil?` as CRuby's C asks `NIL_P`, by identity: a
+# `nil?` made private, redefined or removed changes nothing in how `rescue`
+# builds and matches an error, or in the core methods that test for `nil` (#924).
+class NilClass; private :nil?; end; r = []; begin; nil.foo; rescue NoMethodError => e; r << e.class << e.message << e.receiver << e.name; end; r  #=> [NoMethodError, "undefined method 'foo' for nil", nil, :foo]
+class NilClass; def nil? = raise("nil? asked"); end; r = []; begin; nil.foo; rescue NoMethodError => e; r << e.class << e.message; end; begin; raise ArgumentError; rescue => e; r << e.message; end; r  #=> [NoMethodError, "undefined method 'foo' for nil", "ArgumentError"]
+class NilClass; remove_method :nil?; end; r = []; begin; nil.foo; rescue NoMethodError => e; r << e.class << e.message; end; begin; raise TypeError, "t"; rescue TypeError, ArgumentError => e; r << e.full_message(highlight: false).lines.first.include?("t (TypeError)"); end; r  #=> [NoMethodError, "undefined method 'foo' for nil", true]
+class NilClass; private :nil?; end; [[nil, 1] <=> [nil, 1], [1, nil, 2].compact, [nil, 2].index(nil), ({a: nil}.fetch(:a)), (raise("x") rescue $!.message), Integer("12", exception: false), "a,b".split(",", -1)]  #=> [0, [1, 2], 0, nil, "x", 12, ["a", "b"]]
+class Object; private :nil?; end; r = []; begin; raise ArgumentError, "a"; rescue => e; r << e.message << e.class; end; r << (1.nil? rescue $!.class) << nil.nil? << [3, nil].compact  #=> ["a", ArgumentError, NoMethodError, true, [3]]
 # ------------------------------- the call loop's own instructions and returns (#746, #750)
 # An if or unless whose value nothing reads compiles to its test and its arms
 # alone; a missing arm pushes nothing, and `x unless c` is one jump.
