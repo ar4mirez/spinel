@@ -3,9 +3,11 @@
 #
 # This Ractor's enabled `TracePoint`s are `@__hooks__`, newest first, as
 # CRuby connects a hook at the head of its list, and `__trace_events__` tells
-# the interpreter the union of the events they wait for. While that is not
-# zero the loop leaves its fast paths and, before every instruction, looks
-# for an event there (`interp.rs`, "TracePoint"); each it finds is a call to
+# the interpreter the union of the events they wait for. While that has
+# `:line` or `:return` the loop leaves its fast paths and, before every
+# instruction, looks for an event there; `:call`, `:class` and `:raise` it
+# looks for only where a frame is pushed or an exception starts
+# (`interp.rs`, "TracePoint"). Each event it finds is a call to
 # `TracePoint.__fire__` pushed on top of the frame it happened in, which runs
 # every hook that wants it. A hook runs with this thread's `__tracing__` set,
 # so the events its own code makes fire nothing, as CRuby's do not, until

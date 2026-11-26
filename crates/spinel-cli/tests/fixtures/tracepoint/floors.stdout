@@ -1,0 +1,72 @@
+75000
+75000
+606
+4
+75000
+"deep"
+IndexError
+12
+nil
+"inner"
+["deep", "deep", "deep"]
+30
+12527512
+"deep"
+[:inherited, nil, 5, 3]
+[:inherited, nil, 5, 3]
+[:inherited, nil, 5, 3]
+[:inherited, "Made", 5, 3]
+[:class, 72, Made, nil, false]
+[:class, 75, Mixed, nil, false]
+[:inherited, nil, 5, 3]
+[:inherited, "Late", 5, 3]
+[:class, 87, Late, nil, false]
+[:inherited, "Warm0", 5, 3]
+[:class, 92, Warm0, nil, nil]
+[:body, 1, 3]
+[:inherited, "Warm1", 5, 3]
+[:class, 92, Warm1, nil, nil]
+[:body, 1, 3]
+[:inherited, "Warm2", 5, 3]
+[:class, 92, Warm2, nil, nil]
+[:body, 1, 3]
+[:inherited, "Warm3", 5, 3]
+[:class, 92, Warm3, nil, nil]
+[:body, 1, 3]
+[:raise, 107, ArgumentError, :thrower, 27]
+[:raise, 123, IndexError, :fetch, 27]
+[:raise, 127, RuntimeError, nil, 27]
+[:raise, 129, TypeError, nil, 27]
+[:raise, 107, ArgumentError, :thrower, 27]
+[:raise, 107, ArgumentError, :thrower, 27]
+[:raise, 107, ArgumentError, :thrower, 27]
+[:call, 31, :hot]
+[:call, 17, :add]
+[:call, 21, :each_twice]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 17, :add]
+[:call, 21, :each_twice]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 26, :deep]
+[:call, 150, :start_lines]
+[:line, 160]
+[:line, 158]
+[:line, 18]
+[:line, 159]
+[:line, 160]
+[:line, 158]
+[:line, 18]
+[:line, 159]
+[:line, 160]
+[:line, 162]
+[:line, 172]
+[:call, 110, :catcher]
+[:call, 106, :thrower]
+[:call, 106, :thrower]
+[:raise, 107, ArgumentError, :thrower, 27]
+57

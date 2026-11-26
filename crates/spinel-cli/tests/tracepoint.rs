@@ -26,6 +26,15 @@
 //!   `$!` inside a hook,
 //!   the names, classes and bindings an event reports, one thread's events,
 //!   `enable(target:, target_line:)`, and the `:line`s of endless defs.
+//! - `floors`: `TracePoint`s that wait only for `:class`, `:raise` or
+//!   `:call`, which leave the interpreter on its fast paths (#908), around
+//!   the same kind of warmed-up code: a `:class` after an `inherited` that
+//!   ends in a call the fast paths return from, before the body's first line,
+//!   `:raise`s deep in calls they made and in the core library, and then a
+//!   `:line` enabled from inside a running loop. Recorded with `ruby 3.4.10
+//!   (2026-06-30 revision 2b0b7728dc) +PRISM [x86_64-linux]` rather than
+//!   4.0.9, the CRuby to hand; Spinel wrote the same before #908, when every
+//!   `TracePoint` took it off its fast paths.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,4 +73,4 @@ macro_rules! cases {
     };
 }
 
-cases!(deopt, unwind, hooks);
+cases!(deopt, unwind, hooks, floors);
