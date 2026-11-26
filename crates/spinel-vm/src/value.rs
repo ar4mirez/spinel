@@ -272,6 +272,12 @@ impl Value {
         }
     }
 
+    /// Whether this is a flonum, by its tag alone.
+    #[inline]
+    pub const fn is_flonum(self) -> bool {
+        self.bits() & FLONUM_MASK == FLONUM_TAG
+    }
+
     #[inline]
     pub const fn as_flonum(self) -> Option<f64> {
         let v = self.bits();

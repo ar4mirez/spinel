@@ -178,9 +178,9 @@ const _: () = {
 /// for as long as nothing allocates, collects, assigns an instance variable
 /// other than in place or runs the closure that fills caches. A run of the
 /// interpreter's light instructions does none of those: the only write it
-/// makes, [`HandleScope::cached_set_ivar`]'s, overwrites a slot of storage
-/// that stays where it was, in the shape it had, and a read through the view
-/// after it reads the slot as it is then.
+/// makes, [`HandleScope::cached_set_ivar`]'s or [`IvarView::write`]'s,
+/// overwrites a slot of storage that stays where it was, in the shape it
+/// had, and a read through the view after it reads the slot as it is then.
 pub(crate) struct IvarView {
     /// The object's shape, or [`IvarView::NOTHING`] when its instance
     /// variables are not in storage of its own: then nothing is answered.
@@ -222,6 +222,47 @@ impl IvarView {
         // object's storage of `len` slots, which the promise keeps live and
         // in place.
         Some(unsafe { self.values.add(index).read() })
+    }
+
+    /// The write the `SetIvar` site whose cache is `slot` makes of `value`,
+    /// an immediate, to `object`, the object this view was made of, when
+    /// its cache was filled for the shape this view saw and `object` is
+    /// neither frozen nor chilled: [`HandleScope::cached_set_ivar`]'s
+    /// overwrite in place, with one of the object's headers looked at
+    /// rather than both (#750). Answers whether it wrote; when it did not,
+    /// nothing changed.
+    ///
+    /// # Safety
+    ///
+    /// As for [`IvarView::read`], and `object` is the object
+    /// [`HandleScope::ivar_view`] made this view of.
+    #[inline(always)]
+    pub(crate) unsafe fn write(&self, object: Value, slot: u32, value: Value) -> bool {
+        let slot = slot as usize;
+        if slot >= self.caches_len || !value.is_immediate() {
+            return false;
+        }
+        // SAFETY: as in `read`.
+        let entry = unsafe { self.caches.add(slot).read() };
+        let index = entry.index as usize;
+        if (entry.shape != self.shape) | (index >= self.len) {
+            return false;
+        }
+        // A shape other than `NOTHING` came from a heap object's header.
+        let Some(pointer) = object.as_heap() else {
+            return false;
+        };
+        // SAFETY: the object the view was made of, which the promise keeps
+        // live; one byte of its header.
+        let flags = unsafe { (*pointer.cast::<Header>().as_ptr()).flags };
+        if flags & (FROZEN | CHILLED | CHILLED_SYMBOL) != 0 {
+            return false;
+        }
+        // SAFETY: as in `read`. The pointer is the storage's own, from
+        // `Obj::slots`. An immediate needs no write barrier, and there is
+        // none, as for `set_slot`.
+        unsafe { self.values.cast_mut().add(index).write(value) };
+        true
     }
 }
 
