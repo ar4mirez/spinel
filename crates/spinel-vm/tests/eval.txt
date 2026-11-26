@@ -3045,3 +3045,27 @@ def pl_d746(n) = n == 0 ? 0 : 1 + pl_d746(n - 1); pl_d746(3000)  #=> 3000
 # plain one, and the return to it, each see their own (#746).
 module PlR746i; refine(Integer) { def +(o) = :refined }; end; class PlP746; def plain(a) = a + 1; def go(a) = [plain(a), plain(a)]; end; class PlQ746; using PlR746i; def ref(a) = a + 1; def go(a) = [ref(a), PlP746.new.plain(a), ref(a), a + 1]; end; [PlP746.new.go(1), PlQ746.new.go(1)]  #=> [[2, 2], [:refined, 2, :refined, :refined]]
 def pl_fib746(n) = n < 2 ? n : pl_fib746(n - 1) + pl_fib746(n - 2); class Integer; alias_method :pl_p746, :+; end; a = pl_fib746(10); class Integer; def +(o) = pl_p746(o).pl_p746(1000); end; b = pl_fib746(5); class Integer; alias_method :+, :pl_p746; end; [a, b, pl_fib746(10)]  #=> [55, 7005, 55]
+
+# ------------------------------------------- Float-flavoured frames (#750)
+# A frame of Float arithmetic runs its stretches where a primitive's light
+# form answers in place, so `b = a[i]`, `b.x` and the arithmetic after them
+# stay in one stretch: a heap value set to a local, or to a local a block
+# captured, is rooted first, under GC.stress and past the loop's root limit.
+class H750n; attr_reader :x; def initialize(x) = (@x = x); end; def h750n(a) = (s = 0.0; i = 0; b = nil; keep = []; while i < a.size; b = a[i]; s += b.x * 2.0; keep << "k#{i}"; i += 1; end; [s, b.x, keep]); a = Array.new(4) { |i| H750n.new(i * 1.5) }; GC.stress = true; r = h750n(a); GC.stress = false; r  #=> [18.0, 4.5, ["k0", "k1", "k2", "k3"]]
+def h750e(a) = (s = 0.0; b = nil; get = -> { b }; a.each_index { |i| b = a[i]; s += b.size * 1.5 }; [s, get.call]); GC.stress = true; r = h750e(["x", "yy", "zzz"]); GC.stress = false; r  #=> [9.0, "zzz"]
+def h750r(a) = (s = 0.0; i = 0; while i < 6000; b = a[i % 3]; s += b.size * 0.5; GC.start if i == 5000; i += 1; end; [s, b]); h750r(["a", "bb", "ccc"])  #=> [6000.0, "ccc"]
+class A750x; attr_reader :x; def initialize = (@x = 1.5); end; class B750x; def x = 2.5; end; def h750x(a) = (s = 0.0; a.each { |o| s += o.x * 2.0 }; s); h750x([A750x.new, B750x.new, A750x.new, A750x.new])  #=> 14.0
+# An instance-variable write of an immediate to self answers through the
+# view of self a read took; a frozen self, a heap value and another shape
+# go the general way.
+class F750w; def initialize = (@v = 0.0; @n = 0); def run(k) = (i = 0; while i < k; @v += 1.5; @n = i; freeze if i == 2; i += 1; end); attr_reader :v, :n; end; f = F750w.new; [(f.run(5) rescue $!.class), f.v, f.n, f.frozen?]  #=> [FrozenError, 4.5, 2, true]
+class G750w; def initialize = (@v = 0.0); def run = (i = 0; while i < 4; @v += 0.5; @s = "s#{i}"; instance_variable_set(:"@z#{i}", i) if i.odd?; i += 1; end; [@v, @s, instance_variables]); end; G750w.new.run  #=> [2.0, "s3", [:@v, :@s, :@z1, :@z3]]
+class K750w; def initialize = (@a = 1.0; @b = 2.0); def swap = (i = 0; while i < 3; @a, @b = @b * 1.0, @a * 1.0; i += 1; end; [@a, @b]); end; K750w.new.swap  #=> [2.0, 1.0]
+# An operator with a flonum on the left in such a frame answers as Float's
+# own: an Integer, a heap Float or anything else on either side, or an
+# answer that needs a heap Float, goes the general way, and a redefinition
+# of Float's or Integer's operators is heard at once.
+def m750g(xs) = (s = 0.0; r = []; i = 0; while i < xs.size; x = xs[i]; y = 2.0; r << (x * y) << (y * x) << (x - y) << (y < x); s = s + x; i += 1; end; [s, r]); m750g([1.5, 2, 1.0e308, -0.0, 3.0e-300])  #=> [1.0e+308, [3.0, 3.0, -0.5, false, 4.0, 4.0, 0.0, false, Infinity, Infinity, 1.0e+308, true, -0.0, -0.0, -2.0, false, 6.0e-300, 6.0e-300, -2.0, false]]
+def m750s(x) = (r = []; i = 0; while i < 2; r << (x + 1) << (x * 2.0) << ((x + "s") rescue $!.class); i += 1; end; r); [m750s(1.5), m750s(2)]  #=> [[2.5, 3.0, TypeError, 2.5, 3.0, TypeError], [3, 4.0, TypeError, 3, 4.0, TypeError]]
+def m750h = (r = []; i = 0; x = 1.5; while i < 3; r << x * 2.0; Float.class_eval { alias_method :mul750h, :*; def *(o) = :redef } if i == 0; i += 1; end; Float.class_eval { alias_method :*, :mul750h; remove_method :mul750h }; r << x * 2.0); m750h  #=> [3.0, :redef, :redef, 3.0]
+class Integer; alias_method :sub750i, :-; def -(o) = :isub; end; def m750i(x) = (s = 0.0; i = 0; while i < 3; s = s - x; i += 1; end; s); r = [m750i(0.5), 5 - 1]; class Integer; alias_method :-, :sub750i; remove_method :sub750i; end; r  #=> [-1.5, :isub]
