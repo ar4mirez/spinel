@@ -45,7 +45,7 @@ use crate::bytecode::{
 };
 use crate::callcache::{CallCaches, Callable, Direct, Entered, NativePlan, Plan, Yielded};
 use crate::class::Builtin;
-use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
+use crate::class::{ClassId, CrefId, Kind, Method, NIL_P_GUARD, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
     BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IoBufOp,
@@ -5953,7 +5953,9 @@ fn send_simple(
     send_bound::<false>(scope, stack, frames, index, ids)
 }
 
-/// [`send_simple`] for a site that splats.
+/// [`send_simple`] for a site that splats: by its plan alone when it has
+/// one for the splat ([`send_direct_splatted`]), and otherwise as
+/// [`send_bound`] binds it.
 #[inline(never)]
 fn send_splatted(
     scope: &mut HandleScope<'_>,
@@ -5962,7 +5964,97 @@ fn send_splatted(
     index: u32,
     ids: &mut u64,
 ) -> Option<Value> {
+    let top = frames.len() - 1;
+    if let Plan::Direct(plan) = scope.call_caches().plan(frames[top].cache_base + index)
+        && plan.splats
+        && let Some(receiver) = send_direct_splatted(scope, stack, frames, plan, index, ids)
+    {
+        return Some(receiver);
+    }
     send_bound::<true>(scope, stack, frames, index, ids)
+}
+
+/// [`send_direct`] for a site whose plan was made for a splat: the call
+/// answered by the plan's own guards, as `send_direct` answers one, and the
+/// splatted values given way to their elements once nothing can decline it
+/// (#751). [`send_bound`] reads the site's entry and the plan again, works
+/// out whom the method may be called for and copies the arguments out and
+/// back before it pushes; this reads the site only for what it pushed and
+/// what it splats, which the plan does not keep.
+///
+/// `f(*x)`, the splat a recursive walk makes — `item_check(*left)` in
+/// yjit-bench `binarytrees` — is spread where it stands: the one value is
+/// `nil` or an `Array`, as `Insn::SplatArray` left it, and its elements
+/// take its place. Any other splatting site goes through [`splatted_argc`]
+/// and [`splat_in_place`], as `send_bound` does.
+///
+/// `None`, with nothing changed, for anything the plan does not answer for
+/// itself, as for `send_direct`.
+#[inline(always)]
+fn send_direct_splatted(
+    scope: &HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    plan: &Direct,
+    index: u32,
+    ids: &mut u64,
+) -> Option<Value> {
+    let frame = frames.last().expect("a frame to send from");
+    let site = &frame.iseq.call_sites[index as usize];
+    // A plan is made for a splat only at a site that writes no keywords
+    // (`splatted_argc`), so the site's pushed values are all positional.
+    let pushed = usize::from(site.argc);
+    let at = stack.len().checked_sub(pushed + 1)?;
+    let receiver = stack[at];
+    if scope.class_object_of(receiver) != Some(plan.class_object) {
+        return None;
+    }
+    let classes = scope.classes();
+    if classes.serial(plan.class) != plan.serial
+        || (classes.cref_refined(frame.cref)
+            && classes
+                .refined_lookup(plan.class, plan.name, frame.cref)
+                .is_some())
+        || !callable_for(plan.callable, frame, receiver)
+    {
+        return None;
+    }
+    let argc = usize::from(plan.argc);
+    if pushed == 1 && site.splats.len() == 1 {
+        let value = stack[at + 1];
+        let elements = if value == Value::NIL {
+            &[][..]
+        } else {
+            array_slice_of(scope, value)?
+        };
+        // A final Hash `ruby2_keywords` flagged becomes the call's keywords,
+        // which only `pop_call` binds.
+        if elements.len() != argc
+            || elements
+                .last()
+                .is_some_and(|&last| scope.is_keywords_of(last))
+        {
+            return None;
+        }
+        // Element by element, as `push_direct` places arguments: a call of
+        // `extend_from_slice` for two values cost more than the copy.
+        match elements {
+            [] => stack.values.truncate(at + 1),
+            [first, rest @ ..] => {
+                stack.values[at + 1] = *first;
+                for &element in rest {
+                    stack.values.push(element);
+                }
+            }
+        }
+    } else {
+        if splatted_argc(scope, &stack[at + 1..], site)? != argc {
+            return None;
+        }
+        splat_in_place(scope, &mut stack.values, at + 1, pushed, &site.splats);
+    }
+    push_direct(scope, stack, frames, plan, at, argc, receiver, ids);
+    Some(receiver)
 }
 
 /// The body of [`send_simple`], for a site that passes no block and no
@@ -6698,6 +6790,18 @@ fn native_send(
     let at = stack.len().checked_sub(usize::from(plan.argc) + 1)?;
     let receiver = stack[at];
     if scope.class_object_of(receiver) != Some(plan.class_object) {
+        // `nil.nil?` from a site whose entry is `Kernel#nil?`'s, for the
+        // class its other receivers are: `true`, as CRuby's `opt_nil_p`
+        // answers it, while `NilClass#nil?` is still the core library's.
+        // The site keeps the entry it has, rather than swapping `nil`'s in
+        // front and back at nearly every call over a tree of Arrays and
+        // `nil`s, each swap a frame pushed for `NilClass#nil?` (#751).
+        if receiver == Value::NIL
+            && matches!(plan.native, Native::NilP)
+            && nil_answers_nil_p(scope, frame)
+        {
+            return Some((at, Value::TRUE));
+        }
         return None;
     }
     // One read of the class table for the three questions it answers here.
@@ -6723,6 +6827,31 @@ fn native_send(
     let slot = frame.cache_base + index;
     let value = native_light(scope, plan, slot, receiver, &stack[at + 1..], may_allocate)?;
     Some((at, value))
+}
+
+/// Whether a call of `nil?` on `nil` from `frame` would run the core
+/// library's `NilClass#nil?`, whose answer is `true`, and nothing a program
+/// could see besides: no `TracePoint` waiting for the frame's events, no
+/// refinement where the call is written, no warning or redefinition for
+/// `dispatch` to say first (as [`native_send`] leaves those to it), and the
+/// method still the public body the core library defined
+/// ([`Classes::fresh_nil_p`]). Out of line, so that the loops
+/// [`native_send`] is inlined into carry only the call.
+///
+/// [`Classes::fresh_nil_p`]: crate::class::Classes::fresh_nil_p
+#[inline(never)]
+fn nil_answers_nil_p(scope: &mut HandleScope<'_>, frame: &Call) -> bool {
+    if scope.trace_events() != 0 || scope.has_pending_warning() {
+        return false;
+    }
+    let classes = scope.classes();
+    if classes.cref_refined(frame.cref) || classes.has_redefined() {
+        return false;
+    }
+    match classes.fresh_nil_p() {
+        Some(native) => native,
+        None => scope.classes_mut().nil_p(),
+    }
 }
 
 /// `Insn::Yield` without a `Pending`, for the yield most are: positional
@@ -9997,6 +10126,10 @@ const OPTIMISED_METHODS: &[(Builtin, &[&str])] = &[
 /// Start watching [`OPTIMISED_METHODS`]: what each class owns now is the body
 /// a program's change is measured against. The embedder calls this once the
 /// core library has loaded, so its own definitions are not a program's.
+///
+/// `NilClass#nil?` is sealed here too, the body `core/nil_class.rb` defined,
+/// so that a call answers `nil.nil?` without a frame while a lookup still
+/// finds it (see [`nil_answers_nil_p`]).
 pub fn watch_optimised(scope: &mut HandleScope<'_>) {
     let methods: Vec<(ClassId, SymbolId)> = OPTIMISED_METHODS
         .iter()
@@ -10007,6 +10140,15 @@ pub fn watch_optimised(scope: &mut HandleScope<'_>) {
         })
         .collect();
     scope.classes_mut().watch_optimised(&methods);
+    let nil_class = Builtin::NilClass.id();
+    let nil_p = crate::shared::symbols::intern("nil?");
+    if let Some(method) = scope.lookup_method(nil_class, nil_p)
+        && method.owner == nil_class
+    {
+        scope
+            .classes_mut()
+            .seal_operator(NIL_P_GUARD, nil_class, 0, nil_p, method.body);
+    }
 }
 
 /// `Warning[:performance]`'s "Redefining 'Integer#+' disables interpreter and
@@ -31216,6 +31358,156 @@ mod tests {
         let handle = scope.root(pair);
         array_set_window(&mut scope, handle, 1, 1);
         assert_eq!(array_slice_of(&scope, pair), Some(&[int(2)][..]));
+    }
+
+    /// A splat call bound by its plan alone, and `nil.nil?` answered from a
+    /// site whose entry is `Kernel#nil?`'s for Arrays (#751): `go(x)` calls
+    /// `pair(*x)` and `nil_p(x)` asks `x.nil?`, each again once its site is
+    /// warm, across a collection, and `nil_p` once more after `NilClass#nil?`
+    /// is redefined. Built by hand for miri, as
+    /// `a_call_pushes_a_frame_under_miri` is.
+    #[test]
+    fn a_splat_call_and_nil_p_answer_from_their_plans_under_miri() {
+        let site = |name: u32, argc: u16, splats: Vec<u16>, implicit_self: bool| {
+            crate::bytecode::CallSite {
+                name,
+                argc,
+                splats,
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self,
+                variable_call: false,
+                kwsplat: false,
+            }
+        };
+        let method = |name: &str, insns, symbols, call_sites, locals: Vec<Box<str>>| {
+            let required = (0..u16::try_from(locals.len()).unwrap()).collect();
+            Arc::new(Iseq {
+                name: name.into(),
+                insns,
+                symbols,
+                call_sites,
+                locals,
+                max_stack: 4,
+                params: ParamSpec {
+                    required,
+                    ..ParamSpec::default()
+                },
+                scope_barrier: true,
+                ..Iseq::default()
+            })
+        };
+        // def pair(a, b) = [b, a]
+        let pair = method(
+            "pair",
+            vec![
+                Insn::GetLocal(1, 0),
+                Insn::GetLocal(0, 0),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            Vec::new(),
+            Vec::new(),
+            vec!["a".into(), "b".into()],
+        );
+        // def go(x) = pair(*x)
+        let go = method(
+            "go",
+            vec![
+                Insn::PushSelf,
+                Insn::GetLocal(0, 0),
+                Insn::SplatArray,
+                Insn::Send(0),
+                Insn::Leave,
+            ],
+            vec!["pair".into()],
+            vec![site(0, 1, vec![0], true)],
+            vec!["x".into()],
+        );
+        // def nil_p(x) = x.nil?
+        let nil_p = method(
+            "nil_p",
+            vec![Insn::GetLocal(0, 0), Insn::Send(0), Insn::Leave],
+            vec!["nil?".into()],
+            vec![site(0, 0, Vec::new(), false)],
+            vec!["x".into()],
+        );
+        // `NilClass#nil?`, as `core/nil_class.rb` defines it, and another.
+        let core_nil_p = method(
+            "nil?",
+            vec![Insn::PushTrue, Insn::Leave],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let other_nil_p = method(
+            "nil?",
+            vec![Insn::PushInt(7), Insn::Leave],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        // [go([1, 2]), go([3, 4]), go([5, 6]), nil_p([1]), nil_p(nil), ...]
+        let mut insns = Vec::new();
+        for (a, b) in [(1, 2), (3, 4), (5, 6)] {
+            insns.extend([
+                Insn::PushSelf,
+                Insn::PushInt(a),
+                Insn::PushInt(b),
+                Insn::NewArray(2),
+                Insn::Send(0),
+            ]);
+        }
+        for _ in 0..3 {
+            insns.extend([Insn::PushSelf, Insn::PushInt(1), Insn::NewArray(1)]);
+            insns.push(Insn::Send(1));
+            insns.extend([Insn::PushSelf, Insn::PushNil, Insn::Send(1)]);
+        }
+        insns.extend([Insn::NewArray(9), Insn::Leave]);
+        let caller = Iseq {
+            name: "<test>".into(),
+            insns,
+            symbols: vec!["go".into(), "nil_p".into()],
+            call_sites: vec![site(0, 1, Vec::new(), true), site(1, 1, Vec::new(), true)],
+            max_stack: 16,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(0);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let define = |scope: &mut HandleScope<'_>, class: Builtin, iseq: &Arc<Iseq>| {
+            let name = crate::shared::symbols::intern(&iseq.name);
+            let body = scope
+                .definitions_mut()
+                .intern_iseq(iseq, Arc::as_ptr(iseq) as usize);
+            scope.classes_mut().define_method(class.id(), name, body);
+        };
+        for iseq in [&pair, &go, &nil_p] {
+            define(&mut scope, Builtin::Object, iseq);
+        }
+        define(&mut scope, Builtin::NilClass, &core_nil_p);
+        // What the embedder does once the core library has loaded.
+        watch_optimised(&mut scope);
+
+        let value = eval_in(&mut scope, &mut frame, &caller).expect("should run");
+        let want = "[[2, 1], [4, 3], [6, 5], false, true, false, true, false, true]";
+        assert_eq!(inspect(&mut scope, value), want);
+        scope.collect();
+        let value = eval_in(&mut scope, &mut frame, &caller).expect("should run");
+        assert_eq!(inspect(&mut scope, value), want);
+
+        define(&mut scope, Builtin::NilClass, &other_nil_p);
+        // What `Warning[:performance]` would be told, which needs the core
+        // library's `Kernel.__warning__`: taken here, so that what declines
+        // `nil.nil?` is the guard rather than the waiting redefinition.
+        assert_eq!(scope.classes_mut().take_redefined().len(), 1);
+        let value = eval_in(&mut scope, &mut frame, &caller).expect("should run");
+        assert_eq!(
+            inspect(&mut scope, value),
+            "[[2, 1], [4, 3], [6, 5], false, 7, false, 7, false, 7]"
+        );
     }
 
     #[test]
