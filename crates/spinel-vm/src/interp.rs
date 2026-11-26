@@ -451,6 +451,16 @@ struct Call {
     /// [`FRAME_HOOK`] for any hook's frame. One byte, in what the frame's
     /// other bytes leave of its 128.
     trace: u8,
+    /// Whether a `return` anywhere in this frame's body ends this frame and
+    /// nothing else: a method's frame a fast path pushed, its own `return`
+    /// target, whose body has no catch table and is not an `eval` string's
+    /// ([`Direct::returns_plainly`]). Set by [`push_direct`] from its plan,
+    /// and `false` for every other frame, of which [`returns_in_place`] asks
+    /// as it always has (#746). The last byte the frame's other fields leave
+    /// of its 128.
+    ///
+    /// [`Direct::returns_plainly`]: crate::callcache::Direct::returns_plainly
+    returns_plainly: bool,
     /// What few frames hold: see [`Rare`]. `None` until one does.
     rare: Option<Box<Rare>>,
 }
@@ -2649,6 +2659,7 @@ pub fn eval_in(
         owner: None,
         defined_as: None,
         trace: 0,
+        returns_plainly: false,
         rare: None,
     }];
     // Frame ids, handed out in order. Zero means "no such frame", which is what
@@ -3062,14 +3073,14 @@ fn run<'h>(
             // stack, which only an instruction that can collect has to see
             // done, nor the look at the frames. `light_stretch` runs them, and
             // stops at anything else, which comes back here unrun.
-            let mut operands = LightStack::<false>::new(&mut stack, 0);
+            let mut operands = LightStack::<false>::new(&mut stack);
             let ran = light_step::<false, false>(
                 scope,
                 &mut operands,
                 &frames[top],
                 // SAFETY: see `code`.
                 unsafe { &*code },
-                insn,
+                &insn,
                 &mut cur_pc,
                 &mut Lazy::default(),
                 budget.saturating_sub(STEP_MOST - 1) > limit,
@@ -5867,6 +5878,12 @@ fn leave_here(scope: &mut HandleScope<'_>, stack: &mut Stack, frames: &mut Vec<C
 /// `Insn::Return` and `unwind_to_handler` would then do between them is pop
 /// it and leave the value, and the loop does that directly.
 fn returns_in_place(frame: &Call, pc: usize) -> bool {
+    // What a fast path's plan said of the body once, for the frame it
+    // pushed: one byte rather than the frame's ids and the body's catch
+    // table and `eval` mark at every return (#746).
+    if frame.returns_plainly {
+        return !frame.raises_receiver;
+    }
     if frame.home != frame.id || frame.raises_receiver || frame.iseq.eval_in_block {
         return false;
     }
@@ -6177,6 +6194,7 @@ fn push_direct(
             defined_as: Some(plan.name),
             // A method's body: see `trace_mark`.
             trace: FRAME_METHOD,
+            returns_plainly: plan.returns_plainly,
             rare: None,
         },
     );
@@ -6849,6 +6867,7 @@ fn yield_simple(
             owner,
             defined_as,
             trace: 0,
+            returns_plainly: false,
             rare: None,
         },
     );
@@ -7027,6 +7046,7 @@ fn direct_plan(
         .all(|(index, &slot)| usize::from(slot) == argc + index);
     let (cache_base, iseq) = caches.enter(iseq);
     Plan::Direct(Arc::new(Direct {
+        returns_plainly: iseq.catch_table.is_empty() && !iseq.eval_in_block,
         iseq,
         cache_base,
         in_order,
@@ -7996,6 +8016,7 @@ fn bind_and_push(
         owner: call.owner,
         defined_as: call.defined_as,
         trace: 0,
+        returns_plainly: false,
         rare: None,
     });
     Ok(())
@@ -9472,6 +9493,7 @@ fn open_class<'h>(
         } else {
             FRAME_CLASS | entry_owed(scope, TRACE_CLASS)
         },
+        returns_plainly: false,
         rare: None,
     });
     // A new definition's hooks run before its body: each is a frame above the
@@ -20127,7 +20149,7 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
     stack: &mut LightStack<'_, LIGHT>,
     frame: &Call,
     code: &[Insn],
-    insn: Insn,
+    insn: &Insn,
     pc: &mut usize,
     lazy: &mut Lazy,
     pair: bool,
@@ -20137,7 +20159,11 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
     // `spent` says it has reached the loop's limit: not taken here, so that
     // `run` takes it with everything it does between instructions.
     let declined = |displacement: i32| spent && displacement < 0;
-    match insn {
+    // Matched where it stands, so that each arm reads only its own fields:
+    // a copy taken first, as `code[at]` by value was, has every field read
+    // before the jump table, five loads a dispatch, and holds the registers
+    // they went to across the loop (#746).
+    match *insn {
         Insn::PushNil => stack.push(Value::NIL),
         Insn::PushTrue => stack.push(Value::TRUE),
         Insn::PushFalse => stack.push(Value::FALSE),
@@ -20216,7 +20242,7 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
         // `more_stretch` alone: see there.
         Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) if MORE => {
             // A Float literal here rather than out of line (#746).
-            if let Insn::PushFloat(bits) = insn {
+            if let Insn::PushFloat(bits) = *insn {
                 let Some(value) = Value::flonum(f64::from_bits(bits)) else {
                     return 0;
                 };
@@ -20230,7 +20256,7 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
             // An instance-variable write, through the view of `self` a
             // `GetIvar` takes, rather than out of line (#750).
             if LIGHT
-                && let Insn::SetIvar(_, site) = insn
+                && let Insn::SetIvar(_, site) = *insn
                 && let Some(value) = top
             {
                 let view = lazy
@@ -20243,7 +20269,7 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                     return 1;
                 }
             }
-            match light_more(scope, frame, insn, top, Value::NIL) {
+            match light_more(scope, frame, *insn, top, Value::NIL) {
                 More::Push(value) => stack.push(value),
                 More::Pop => {
                     stack.pop();
@@ -20381,11 +20407,29 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
             }
             let local = stack.get(frame.floor + slot as usize);
             if LIGHT && pair {
+                // One copy of the run for each operator, each with its
+                // operator a constant: its bit of the mask a constant test,
+                // and the operator's own arithmetic straight away, rather
+                // than a second jump on `op` inside `fixnum_binop` (#746).
                 let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
-                if ops & (1 << op as usize) != 0
-                    && let Some(value) =
-                        Value::fixnum(int).and_then(|right| fixnum_binop(op, local, right))
-                {
+                let answer = |op: BinOp| {
+                    if ops & (1 << op as usize) == 0 {
+                        return None;
+                    }
+                    Value::fixnum(int).and_then(|right| fixnum_binop(op, local, right))
+                };
+                let value = match op {
+                    BinOp::Add => answer(BinOp::Add),
+                    BinOp::Sub => answer(BinOp::Sub),
+                    BinOp::Lt => answer(BinOp::Lt),
+                    BinOp::Le => answer(BinOp::Le),
+                    BinOp::Gt => answer(BinOp::Gt),
+                    BinOp::Ge => answer(BinOp::Ge),
+                    BinOp::Eq => answer(BinOp::Eq),
+                    BinOp::Neq => answer(BinOp::Neq),
+                    BinOp::Mul | BinOp::Div | BinOp::Mod => None,
+                };
+                if let Some(value) = value {
                     *pc += 2;
                     return 2 + pair_after(scope, stack, frame, code, pc, value, pair, spent);
                 }
@@ -20410,7 +20454,7 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 return 1;
             }
             let first = stack.get(frame.floor + slot as usize);
-            let second = match insn {
+            let second = match *insn {
                 _ if !(LIGHT && pair) => None,
                 Insn::GetLocalGetLocalBinOp { right, .. } => {
                     Some(stack.get(frame.floor + right as usize))
@@ -20781,7 +20825,7 @@ fn light_stretch(
     let room = *budget - limit;
     let mut ran = 0;
     let mut masks = Masks::NONE;
-    stretch::<false>(scope, stack, frame, pc, &mut ran, room, &mut masks);
+    stretch::<false, true>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20808,7 +20852,7 @@ fn more_stretch(
     let room = *budget - limit;
     let mut ran = 0;
     let mut masks = Masks::NONE;
-    stretch::<true>(scope, stack, frame, pc, &mut ran, room, &mut masks);
+    stretch::<true, false>(scope, stack, frame, pc, &mut ran, room, &mut masks);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -20920,7 +20964,7 @@ fn native_run<const MORE: bool, const KEPT: bool>(
     root_limit: usize,
 ) -> Insn {
     let code = &frame.iseq.insns[..];
-    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack);
+    let mut stack = LightStack::<true>::new(stack);
     let mut at = *pc;
     let mut count = *ran;
     let mut lazy = if KEPT {
@@ -20935,7 +20979,7 @@ fn native_run<const MORE: bool, const KEPT: bool>(
             &mut stack,
             frame,
             code,
-            code[at],
+            &code[at],
             &mut after,
             &mut lazy,
             true,
@@ -21000,8 +21044,17 @@ fn native_run<const MORE: bool, const KEPT: bool>(
 /// `masks` carries the operator masks from one stretch to the next: see
 /// [`Masks`]. A caller that runs one stretch alone hands it
 /// [`Masks::NONE`], and the compiler drops what it would have kept.
+///
+/// `COPIED` is whether each instruction is copied out of the body before
+/// its arm runs, every field read ahead of the jump table, rather than
+/// matched where it stands. [`light_stretch`]'s loop wants the copy:
+/// matched in place there, it ran out of registers and kept the body's
+/// address on the stack, a load on the path of every dispatch, `getivar`
+/// 9% more cycles than main in fewer instructions. The other loops,
+/// `calls_loop`'s and `more_stretch`'s, keep it in a register either way
+/// and match in place, which reads only the arm's own fields (#746).
 #[inline(always)]
-fn stretch<const MORE: bool>(
+fn stretch<const MORE: bool, const COPIED: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -21011,7 +21064,7 @@ fn stretch<const MORE: bool>(
     masks: &mut Masks,
 ) -> Insn {
     let code = &frame.iseq.insns[..];
-    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack);
+    let mut stack = LightStack::<true>::new(stack);
     let mut at = *pc;
     let mut count = *ran;
     // Made and dropped within this run, which is what `IvarView::read` asks
@@ -21019,12 +21072,19 @@ fn stretch<const MORE: bool>(
     let mut lazy = masks.seed(frame);
     loop {
         let mut after = at + 1;
+        let copy;
+        let insn = if COPIED {
+            copy = code[at];
+            &copy
+        } else {
+            &code[at]
+        };
         let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
             code,
-            code[at],
+            insn,
             &mut after,
             &mut lazy,
             true,
@@ -21222,6 +21282,17 @@ struct CallsState {
     masks: Masks,
 }
 
+impl CallsState {
+    /// A frame returned: one pushed here, or one below where it started.
+    #[inline(always)]
+    fn left_one(&mut self) {
+        match self.entered.checked_sub(1) {
+            Some(entered) => self.entered = entered,
+            None => self.left = true,
+        }
+    }
+}
+
 /// [`run_calls`]'s loop for frames whose stretches run in `more_stretch`'s
 /// loop when `MORE`, and in `light_stretch`'s otherwise: the instruction a
 /// stretch stopped at, then the stretch after it, inlined here rather than
@@ -21259,7 +21330,7 @@ fn calls_loop<const MORE: bool>(
                 state.root_limit,
             )
         } else {
-            stretch::<MORE>(
+            stretch::<MORE, false>(
                 scope,
                 stack,
                 &frames[top],
@@ -21353,8 +21424,7 @@ fn calls_loop<const MORE: bool>(
             && leaves_untraced(frames, top)
         {
             leave_here(scope, stack, frames, false);
-            state.left |= state.entered == 0;
-            state.entered = state.entered.saturating_sub(1);
+            state.left_one();
             at = frames.last().expect("the caller").pc;
         } else {
             match insn {
@@ -21363,8 +21433,7 @@ fn calls_loop<const MORE: bool>(
                     if top > 0 && !frame.raises_receiver && leaves_untraced(frames, top) =>
                 {
                     leave_here(scope, stack, frames, true);
-                    state.left |= state.entered == 0;
-                    state.entered = state.entered.saturating_sub(1);
+                    state.left_one();
                     at = frames.last().expect("the caller").pc;
                 }
                 // A symbol literal: an immediate, as `run`'s arm pushes it.
@@ -21442,7 +21511,7 @@ fn calls_loop<const MORE: bool>(
                 state.root_limit,
             )
         } else {
-            stretch::<MORE>(
+            stretch::<MORE, false>(
                 scope,
                 stack,
                 &frames[top],
@@ -21592,10 +21661,11 @@ struct LightStack<'s, const LIGHT: bool> {
 }
 
 impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
-    /// Room for `room` more values is made at once, so that a run of pushes
-    /// as deep as a body's operands go does not reach the slow path.
-    fn new(stack: &'s mut Stack, room: usize) -> LightStack<'s, LIGHT> {
-        stack.values.reserve(room);
+    /// No room is made ahead: a push past the capacity grows the `Vec`
+    /// through [`light_grow`], which it reaches the few times the stack
+    /// grows at all, and a `reserve` of the body's operands at every
+    /// stretch was a load and a compare twice each Ruby call (#746).
+    fn new(stack: &'s mut Stack) -> LightStack<'s, LIGHT> {
         let len = stack.values.len();
         let low = len;
         let capacity = stack.values.capacity();
@@ -21646,18 +21716,18 @@ impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
 
     #[inline(always)]
     fn get(&self, at: usize) -> Value {
-        // A copy, so that the message's reference is not to the field: one
-        // to the field would keep the whole of this in memory.
-        let len = self.len;
-        assert!(at < len, "operand {at} past a stack of {len}");
+        if at >= self.len {
+            operand_past(at, self.len);
+        }
         // SAFETY: below `len`, so written.
         unsafe { self.values.add(at).read() }
     }
 
     #[inline(always)]
     fn set(&mut self, at: usize, value: Value) {
-        let len = self.len;
-        assert!(at < len, "operand {at} past a stack of {len}");
+        if at >= self.len {
+            operand_past(at, self.len);
+        }
         // SAFETY: below `len`, so within the buffer.
         unsafe { self.values.add(at).write(value) }
     }
@@ -21693,6 +21763,16 @@ impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
         self.stack.low = self.len;
         self.low = self.len;
     }
+}
+
+/// A [`LightStack`] read or write at `at`, past the `len` values it holds:
+/// the panic `assert!` would raise, out of line and by value, since the
+/// message's arguments, formatted in line, are taken by address, which had
+/// every read of a local store the index and the length first (#746).
+#[cold]
+#[inline(never)]
+fn operand_past(at: usize, len: usize) -> ! {
+    panic!("operand {at} past a stack of {len}")
 }
 
 /// A [`LightStack`] push past the room made: give the `Vec` the `len` values

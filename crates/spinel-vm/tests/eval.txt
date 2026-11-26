@@ -2966,6 +2966,10 @@ def e7s(x); g = -> { x += 10 }; a = x + 1; g.call; [a, x + 1, x < 20]; end; e7s(
 def f7s(c, x, y) = (c ? x : y) + 1; [f7s(true, 1, 10), f7s(false, 1, 10), f7s(true, 1.5, 10)]  #=> [2, 11, 2.5]
 def g7s(n); s = []; i = 0; while i < n; s << "x" + i.to_s if i > 2; i += 1; end; s; end; GC.stress = true; r = g7s(6); GC.stress = false; r  #=> ["x3", "x4", "x5"]
 def h7s(n) = n < 2 ? n : h7s(n - 1) + h7s(n - 2); [h7s(15), [1, 2, 3].map { |v| v + 1 }, [1, 2, 3].select { |v| v > 1 }]  #=> [610, [2, 3, 4], [2, 3]]
+# Each operator's copy of the run asks its own bit of the mask: every one
+# redefined, in a body the call loop enters, is sent to, and answers again
+# once restored (#746).
+class Integer; %i[+ - < <= > >= == !=].each_with_index { |op, i| alias_method :"o#{i}x746", op; define_method(op) { |o| op } }; end; def x746(x) = [x + 1, x - 1, x < 1, x <= 1, x > 1, x >= 1, x == 1, x != 1]; def y746 = [x746(1), x746(2)]; r = y746; class Integer; %i[+ - < <= > >= == !=].each_with_index { |op, i| alias_method op, :"o#{i}x746"; remove_method :"o#{i}x746" }; end; [r, y746]  #=> [[[:+, :-, :<, :<=, :>, :>=, :==, :!=], [:+, :-, :<, :<=, :>, :>=, :==, :!=]], [[2, 0, false, true, false, true, true, false], [3, 1, false, false, true, true, false, true]]]
 # Two locals and an operator are one instruction where they are two fixnums,
 # or two flonums in a body that does Float arithmetic, under an operator of
 # their own; anything else runs the three as written.
@@ -3044,6 +3048,10 @@ class PlR746; def m = :plain; end; module PlRR746; refine(PlR746) { def m = :ref
 class PlA746; def m = :a; end; class PlB746; def m = :b; end; def pl_ab746(o) = o.m; [PlA746.new, PlB746.new, PlA746.new, PlB746.new].map { |o| pl_ab746(o) }  #=> [:a, :b, :a, :b]
 def pl_o746(a, b = 2, k: 3) = [a, b, k]; [pl_o746(1), pl_o746(1, 5), pl_o746(1, k: 9), pl_o746(1, 5, k: 9)]  #=> [[1, 2, 3], [1, 5, 3], [1, 2, 9], [1, 5, 9]]
 def pl_d746(n) = n == 0 ? 0 : 1 + pl_d746(n - 1); pl_d746(3000)  #=> 3000
+# A `return` from a frame a plan pushed, in a body with no catch table, ends
+# that frame in place; one an `ensure` covers, and one in a block, which ends
+# the method around it, go the general way (#746).
+def rp746(x); return x + 1 if x > 0; -x; end; def re746(x); begin; return x * 2 if x > 0; -x; ensure; $re746 << x; end; end; def rb746(a) = (a.each { |v| return v * 3 if v > 1 }; :none); def rr746 = [rp746(1), rp746(-2), re746(3), re746(-4), rb746([1, 2, 3]), rb746([1])]; $re746 = []; [rr746, rr746, $re746]  #=> [[2, 2, 6, 4, 6, :none], [2, 2, 6, 4, 6, :none], [3, -4, 3, -4]]
 # The operator masks a stretch works out are kept for the next stretch of a
 # frame with the same scope and body, so a call from a refined scope to a
 # plain one, and the return to it, each see their own (#746).
