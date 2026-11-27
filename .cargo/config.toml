@@ -5,12 +5,3 @@
 # adds. Read only by libsqlite3-sys's build script.
 [env]
 LIBSQLITE3_FLAGS = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_ENABLE_DBPAGE_VTAB=1 -DSQLITE_ENABLE_DBSTAT_VTAB=1"
-
-# Every function starts on a 64-byte boundary, so that a change elsewhere in
-# the VM does not move a hot loop such as `light_stretch` off one and swing a
-# benchmark by 10-20% with the same instructions retired (yjit-bench
-# `getivar`, #751). An `RUSTFLAGS` in the environment replaces this.
-# ponytail: one flag for the whole build; the ceiling is a larger binary. The
-# upgrade path is `#[align(64)]` on the hot functions once `fn_align` is stable.
-[build]
-rustflags = ["-C", "llvm-args=-align-all-functions=6"]
