@@ -134,8 +134,12 @@ fn ok(out: &Output, what: &str) -> String {
 
 /// `build.rb`, run by this `spinel`, into `root`: the `.gem` it writes,
 /// whose path it answers. Cargo's target directory is shared by the tests,
-/// which cargo's lock on it takes in turn.
+/// which take it in turn: cargo's own lock is not enough, as every cargo
+/// run, fresh or not, removes and relinks the library in the profile
+/// directory, where another test's `build.rb` may be looking for it.
 fn build_gem(root: &Path) -> PathBuf {
+    static BUILDING: Mutex<()> = Mutex::new(());
+    let _turn = BUILDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = root.join("gem");
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();
