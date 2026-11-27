@@ -1586,6 +1586,7 @@ impl Heap {
         }
     }
 
+    #[inline]
     fn cell_from_free_list(&mut self, class_index: usize) -> NonNull<u8> {
         if self.free[class_index].is_null() {
             self.add_block(class_index);
@@ -1853,27 +1854,37 @@ impl Heap {
         for block_index in 0..self.blocks.len() {
             let Block { memory, cell_size } = self.blocks[block_index];
             let class_index = size_class(cell_size).expect("a block holds one size class");
-            // Backwards, so the rebuilt list runs forwards through the block.
-            for i in (0..BLOCK_SIZE / cell_size).rev() {
-                // SAFETY: `i * cell_size` stays inside the block by construction.
-                let cell = unsafe { memory.as_ptr().add(i * cell_size) };
+            // The list's head in a local rather than in `self.free`, which a
+            // write through a cell might alias for all the compiler knows: so
+            // a free cell is two stores, not a load and three (#751).
+            let mut head = self.free[class_index];
+            let mut live = 0;
+            // Backwards, so the rebuilt list runs forwards through the block;
+            // by offset, stepped, rather than an index multiplied out.
+            let mut offset = BLOCK_SIZE / cell_size * cell_size;
+            while offset > 0 {
+                offset -= cell_size;
+                // SAFETY: `offset` stays inside the block by construction.
+                let cell = unsafe { memory.as_ptr().add(offset) };
                 let header = cell.cast::<Header>();
                 // SAFETY: the block was zeroed, so a cell that never held an object
                 // reads as unmarked rather than as uninitialised memory.
                 let flags = unsafe { (*header).flags };
                 if flags & MARKED != 0 {
                     unsafe { (*header).flags = flags & !MARKED };
-                    live_bytes += cell_size;
-                    live_objects += 1;
+                    live += 1;
                 } else {
                     // A finalizer was queued before this loop began
                     // (`queue_finalizers`), so relinking the cell is all
                     // that is left: nothing runs here.
                     unsafe { (*header).flags = 0 };
-                    unsafe { ptr::write(cell.cast::<*mut u8>(), self.free[class_index]) };
-                    self.free[class_index] = cell;
+                    unsafe { ptr::write(cell.cast::<*mut u8>(), head) };
+                    head = cell;
                 }
             }
+            self.free[class_index] = head;
+            live_bytes += live * cell_size;
+            live_objects += live;
         }
 
         self.large.retain(|&(pointer, layout)| {

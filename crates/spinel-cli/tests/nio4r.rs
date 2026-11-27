@@ -100,15 +100,16 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8(out.stdout.clone()).unwrap()
 }
 
-/// `build.rb`, run by this `spinel`, into `root`: the `.gem` it writes,
-/// whose path it answers. Cargo's target directory is shared by the tests,
-/// which cargo's lock on it takes in turn.
+/// `build.rb`, run by this `spinel`, into `root`: cargo's target directory
+/// and the `.gem` it writes, whose path it answers. Each test has its own
+/// target directory: every cargo run, fresh or not, removes and relinks the
+/// library in the profile directory, where another test's `build.rb`
+/// sharing it may be looking for it.
 fn build_gem(root: &Path) -> PathBuf {
     let out = root.join("gem");
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gems/nio4r-spinel/build.rb");
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("nio4r/target");
     let mut command = scrubbed(Command::new(SPINEL));
     command
         .current_dir(root)
@@ -118,7 +119,7 @@ fn build_gem(root: &Path) -> PathBuf {
         .arg("--out")
         .arg(&out)
         .arg("--target-dir")
-        .arg(target)
+        .arg(root.join("target"))
         .args(["--profile", "dev", "--offline", "--jobs", "2"]);
     let printed = ok(&command.output().expect("spinel runs"), "build.rb");
     let gem = PathBuf::from(printed.lines().last().expect("build.rb names the gem"));
