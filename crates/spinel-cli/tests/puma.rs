@@ -143,14 +143,12 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8(out.stdout.clone()).unwrap()
 }
 
-/// `gems/<name>/build.rb`, run by this `spinel`, into `root`: the `.gem` it
-/// writes, whose path it answers. Cargo's target directory is shared by the
-/// tests, which take it in turn: cargo's own lock is not enough, as every
-/// cargo run, fresh or not, removes and relinks the library in the profile
-/// directory, where another test's `build.rb` may be looking for it.
+/// `gems/<name>/build.rb`, run by this `spinel`, into `root`: cargo's
+/// target directory and the `.gem` it writes, whose path it answers. Each
+/// test has its own target directory: every cargo run, fresh or not,
+/// removes and relinks the library in the profile directory, where another
+/// test's `build.rb` sharing it may be looking for it.
 fn build_gem(root: &Path, name: &str, version: &str) -> PathBuf {
-    static BUILDING: Mutex<()> = Mutex::new(());
-    let _turn = BUILDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = root.join(name);
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();
@@ -158,7 +156,6 @@ fn build_gem(root: &Path, name: &str, version: &str) -> PathBuf {
         .join("../../gems")
         .join(name)
         .join("build.rb");
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("puma/target");
     let mut command = scrubbed(Command::new(SPINEL));
     command
         .current_dir(root)
@@ -168,7 +165,7 @@ fn build_gem(root: &Path, name: &str, version: &str) -> PathBuf {
         .arg("--out")
         .arg(&out)
         .arg("--target-dir")
-        .arg(target)
+        .arg(root.join("target"))
         .args(["--profile", "dev", "--offline", "--jobs", "2"]);
     let printed = ok(&command.output().expect("spinel runs"), "build.rb");
     let gem = PathBuf::from(printed.lines().last().expect("build.rb names the gem"));
@@ -638,8 +635,8 @@ p Puma::HAS_SSL, Puma::Const::PUMA_VERSION"#,
 /// directory, offline. Its path, for `PUMA_KEY_UPDATE_PEER`, which
 /// `fixtures/puma/key_update_peer.rb` hands the test in the C's place.
 #[cfg(target_os = "linux")]
-fn key_update_peer() -> PathBuf {
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("puma/target");
+fn key_update_peer(root: &Path) -> PathBuf {
+    let target = root.join("target");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = scrubbed(Command::new(cargo));
     command
@@ -682,7 +679,7 @@ fn pumas_own_suite_passes_as_on_cruby() {
         return;
     }
     let Installed { sandbox, .. } = installed("suite", "app", APP_INSTALLED, true);
-    let peer = key_update_peer();
+    let peer = key_update_peer(&sandbox.root);
 
     let written = sandbox.root.join("results.txt");
     let _ = fs::remove_file(&written);
