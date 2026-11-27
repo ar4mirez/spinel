@@ -2932,6 +2932,13 @@ def z751(o) = o.nil?; r = [z751(nil), z751([1]), z751(nil), z751(Object.new), z7
 class O751; def nil? = :mine; end; def y751(o) = o.nil?; [y751(O751.new), y751(1), y751(O751.new), y751(nil), y751(1)]  #=> [:mine, false, :mine, true, false]
 # Array literals made between calls, and splatted back out, under GC.stress.
 def b751(d) = d == 0 ? [nil, nil] : [b751(d - 1), b751(d - 1)]; def e751(l, r) = l.nil? ? 1 : 1 + e751(*l) + e751(*r); GC.stress = true; t = b751(4); n = e751(*t); GC.stress = false; [n, t.flatten.size, e751(*b751(6))]  #=> [31, 32, 127]
+# The call loop goes straight from an Array literal to the return after it,
+# and from a splat to the call it is for, without a stretch between (#751):
+# a splat of an object that has a `to_a`, of `nil` and of the wrong count
+# still goes the general way, at a warm site and under GC.stress.
+def a4751(x) = [x, x]; def b4751(a, b) = [b, a]; def c4751(x) = b4751(*x); r = (1..3).map { |i| c4751(a4751(i)) }; o = Object.new; def o.to_a = [:t, :u]; r << c4751(o) << (c4751(nil) rescue $!.class) << (c4751([1]) rescue $!.class) << c4751([7, 8])  #=> [[1, 1], [2, 2], [3, 3], [:u, :t], ArgumentError, ArgumentError, [8, 7]]
+def d4751(n) = n == 0 ? [nil, nil] : [d4751(n - 1), d4751(n - 1)]; def e4751(l, r) = l.nil? ? 1 : e4751(*l) + e4751(*r); GC.stress = true; t = d4751(3); x = e4751(*t); GC.stress = false; [x, e4751(*d4751(7)), t.flatten.size]  #=> [8, 128, 16]
+def f4751; end; def g4751(a) = [f4751, a, f4751]; def h4751(*a) = a; def i4751(x) = h4751(*x); [g4751(1), i4751([]), i4751(nil), i4751([1, [2]]), g4751(2)]  #=> [[nil, 1, nil], [], [], [1, [2]], [nil, 2, nil]]
 # A splat of an Array or nil in a loop is left as it is where it is written,
 # without asking `to_a` — not an Array's singleton one, nor a subclass's — and
 # an object that has a `to_a` still asks it, however warm the site.

@@ -5937,11 +5937,16 @@ fn send_simple(
     ids: &mut u64,
 ) -> Option<Value> {
     let top = frames.len() - 1;
-    if let Plan::Direct(plan) = scope.call_caches().plan(frames[top].cache_base + index)
-        && !plan.splats
-        && let Some(receiver) = send_direct(scope, stack, frames, plan, ids)
-    {
-        return Some(receiver);
+    if let Plan::Direct(plan) = scope.call_caches().plan(frames[top].cache_base + index) {
+        // A plan is made only by `send_bound`, which this sends to only for
+        // a site with no block and no keyword splat; one made for a splat is
+        // then `send_splatted`'s, which is where the site below would go.
+        if plan.splats {
+            return send_splatted(scope, stack, frames, index, ids);
+        }
+        if let Some(receiver) = send_direct(scope, stack, frames, plan, ids) {
+            return Some(receiver);
+        }
     }
     let site = &frames[top].iseq.call_sites[index as usize];
     if site.block != BlockRef::None || !site.splats.is_empty() || site.kwsplat {
@@ -21086,8 +21091,11 @@ fn native_calls<const MORE: bool>(
 ///
 /// Its own loop rather than [`stretch`]'s, so that the stretches every other
 /// frame runs in, [`light_stretch`] and [`calls_loop`]'s, keep the
-/// registers they had: a call inside their loop costs them those.
-#[inline(never)]
+/// registers they had: a call inside their loop costs them those. Inlined
+/// into [`native_calls`], its one caller and already out of line, which a
+/// function of its own cost a call, a prologue and an epilogue at every
+/// `x.nil?` of yjit-bench `binarytrees` (#751).
+#[inline(always)]
 fn native_stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
@@ -21691,6 +21699,20 @@ fn calls_loop<const MORE: bool>(
             state.stretch_first = true;
             break true;
         }
+        // A stretch would stop at once at an instruction answered here, and
+        // its setting up and putting away is then all it would do: the
+        // caller's `[left, right]` after the call that made `right`, the
+        // `Leave` after that, the `Send` after `*left` (#751). Not asked at
+        // the start of a body, which a call has just pushed, and where none
+        // of these stands but in a method that does nothing; nor in the
+        // `more_stretch` flavour, whose frames' Float arithmetic seldom
+        // stops at one, and whose own stretch answers a primitive's light
+        // form.
+        let next = &frames[top].iseq.insns[at];
+        if !MORE && at != 0 && stops_stretch(next) {
+            insn = *next;
+            continue;
+        }
         // A frame of the `more_stretch` flavour runs its stretches where a
         // primitive's light form is answered in place (#750).
         insn = if MORE {
@@ -21720,6 +21742,23 @@ fn calls_loop<const MORE: bool>(
     state.ran = ran;
     state.masks = masks;
     switched
+}
+
+/// Whether a [`stretch`] stops at `insn` before running anything, with
+/// nothing changed, for [`calls_loop`] to answer it: none of these is a
+/// light instruction ([`light_step`] answers 0 for each). Matched by
+/// reference, so that only the opcode is read.
+#[inline(always)]
+fn stops_stretch(insn: &Insn) -> bool {
+    matches!(
+        *insn,
+        Insn::Send(_)
+            | Insn::Yield(_)
+            | Insn::Return
+            | Insn::Leave
+            | Insn::NewArray(_)
+            | Insn::SplatArray
+    )
 }
 
 /// Whether [`run_calls`] may return from the frame at `top` and go on in
