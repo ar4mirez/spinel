@@ -6158,6 +6158,7 @@ fn send_bound<const SPLATS: bool>(
                         native,
                         class,
                         class_object: scope.class_object(class),
+                        serial,
                         name: frame.iseq.symbol_ids()[site.name as usize],
                         argc: site.argc,
                     })
@@ -6513,7 +6514,9 @@ fn has_native_light(native: Native, argc: usize) -> bool {
 /// `__math__`'s operations whose answer is one Float: libm's `name` of `x`,
 /// and of `second` for the two-operand ones. `None` for a name that is not
 /// one of them — `lgamma`, `frexp` and `truncate` answer something else, and
-/// any other name is no operation at all.
+/// any other name is no operation at all. Its names are
+/// [`crate::shared::symbols::MATH_FLOAT`] too, which its light form finds
+/// them by.
 fn math_float(name: &[u8], x: f64, second: f64) -> Option<f64> {
     Some(match name {
         b"sin" => x.sin(),
@@ -6694,8 +6697,13 @@ fn light_math(args: &[Value]) -> Option<Value> {
         [name, x, y] => (name.as_symbol()?, operand(x)?, operand(y)?),
         _ => return None,
     };
-    let value = crate::shared::symbols::with_bytes(name, |name| math_float(name, x, second))??;
-    Value::flonum(value)
+    // By the name's id, without the symbol table's lock (#750); a name not
+    // among them is the primitive's, which answers it or says it is none.
+    let at = crate::shared::symbols::math_float()
+        .iter()
+        .position(|&id| id == name)?;
+    let name = crate::shared::symbols::MATH_FLOAT[at].as_bytes();
+    Value::flonum(math_float(name, x, second)?)
 }
 
 /// `__reflect_kind_of__(object, module)`, `Module#===`'s question,
@@ -6745,9 +6753,10 @@ fn light_array_index(
 
 /// `Insn::Send` to a primitive's light form, when the site's plan is one:
 /// [`native_send`], with leave to allocate from `run`'s own arm, which has
-/// rooted the stack, and without from [`run_calls`] and [`native_stretch`].
-/// Out of line, so that those loops carry a call rather than the light
-/// form's code.
+/// rooted the stack, and without from [`run_calls`]. Out of line, so that
+/// those carry a call rather than the light form's code. [`native_stretch`]'s
+/// loop, whose every call is one of these or ends it, reads the plan itself
+/// and calls `native_send` in line (#750).
 #[inline(never)]
 fn light_send(
     scope: &mut HandleScope<'_>,
@@ -6816,11 +6825,12 @@ fn native_send(
     {
         return None;
     }
-    let serial = classes.serial(plan.class);
+    // The plan's class and serial are its entry's, as a `Direct` plan's are
+    // (see `send_bound`): one compare rather than the entry's slot (#750).
+    if classes.serial(plan.class) != plan.serial {
+        return None;
+    }
     let redefined = classes.has_redefined();
-    scope
-        .call_caches()
-        .get(frame.cache_base + index, plan.class, serial)?;
     // What `dispatch` does after any primitive: say the warning it left,
     // and the redefinitions since the last. With either waiting, it is
     // `dispatch`'s call.
@@ -20400,6 +20410,27 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
             if LIGHT && top.is_some_and(|value| !value.is_immediate()) {
                 return 0;
             }
+            // A constant read its site's cache answers, `Math` and `Float`
+            // in `Math.sqrt(x)`, here rather than out of line (#750), as
+            // `light_more` answers it.
+            if let Insn::GetConst(name, how, site) = *insn
+                && how != ConstScope::Qualified
+            {
+                let symbol = frame.iseq.symbol_ids()[name as usize];
+                if scope.any_autoloads() && scope.autoloads(symbol) {
+                    return 0;
+                }
+                let epoch = scope.classes().const_epoch();
+                let Some(value) =
+                    scope
+                        .call_caches()
+                        .scoped_constant(frame.cache_base + site, epoch, frame.cref)
+                else {
+                    return 0;
+                };
+                stack.push(value);
+                return 1;
+            }
             // An instance-variable write, through the view of `self` a
             // `GetIvar` takes, rather than out of line (#750).
             if LIGHT
@@ -21079,7 +21110,12 @@ fn native_stretch<const MORE: bool>(
 /// A local set to a heap value, `b = a[i]`, is set here too, once what is
 /// fresh on the stack is rooted, as [`calls_set_local`] roots it, while the
 /// handles held stay within `root_limit` (see [`LightCalls::root_limit`]).
-#[inline(never)]
+///
+/// Inlined into [`calls_loop`]'s `more_stretch` flavour, as the other
+/// flavour's stretches are (#746): a function of its own, it cost each Ruby
+/// call from a Float frame a prologue and an epilogue twice, for the
+/// stretch after the push and the one after the return (#750).
+#[inline(always)]
 #[expect(clippy::too_many_arguments, reason = "the call loop's own registers")]
 fn more_native_stretch(
     scope: &mut HandleScope<'_>,
@@ -21157,13 +21193,24 @@ fn native_run<const MORE: bool, const KEPT: bool>(
             continue;
         }
         let Insn::Send(index) = code[at] else { break };
-        let Some((to, value)) = light_send(scope, frame, index, stack.live(), false) else {
+        // The site's plan, read once: a primitive's light form is answered
+        // here, in line, and a call to a Ruby method, `Math.sqrt(x)`, is the
+        // call loop's, told without the call `light_send` was at every such
+        // call (#750).
+        let Plan::Native(plan) = *scope.call_caches().plan(frame.cache_base + index) else {
             break;
         };
-        // What `IvarView::read` asks of the view: made since nothing wrote.
-        // A light form assigns no instance variable, but the view is let go
-        // rather than kept on that.
-        lazy.view = None;
+        let Some((to, value)) = native_send(scope, frame, index, &plan, stack.live(), false) else {
+            break;
+        };
+        // A light form allocates nothing and assigns no instance variable,
+        // so the view of `self` still says what `self` holds; but an
+        // `attr_reader`'s miss fills its cache, so the view is pointed at the
+        // caches again, as `IvarView::read` asks (#750). Remade instead, it
+        // cost the read of `@y` after `b2.x` a look at `self` again.
+        if let Some(view) = lazy.view.as_mut() {
+            scope.refresh_ivar_view(view);
+        }
         stack.truncate(to);
         if matches!(code.get(at + 1), Some(Insn::Pop)) {
             at += 2;
@@ -32052,6 +32099,19 @@ mod tests {
         arithmetic_that_leaves_the_fast_path_refuses(BinOp::Lt, Value::NIL, Value::NIL);
     }
 
+    /// Every name `__math__`'s light form finds by its id is one
+    /// `math_float` answers (#750): one it did not would leave that
+    /// operation's every call to the primitive's own arm.
+    ///
+    /// Not under miri, which cannot call libm's `erf`, `tgamma` and the rest.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_name_light_math_finds_is_one_math_float_answers() {
+        for name in crate::shared::symbols::MATH_FLOAT {
+            assert!(math_float(name.as_bytes(), 0.5, 2.0).is_some(), "{name}");
+        }
+    }
+
     /// The light loop's Float operators answer what `float_op` and `ruby_eq`
     /// answer for two flonums, and decline an answer that needs a heap
     /// Float, `%`, and an operand that is not a flonum (#750).
@@ -32357,6 +32417,158 @@ mod tests {
         scope.set_gc_stress(false);
         let v = 4.5 * rounds as f64;
         assert_eq!(inspect(&mut scope, value), format!("[\"z\", {v:?}, 1.5]"));
+    }
+
+    /// A Float frame's stretch keeps the view of `self` across a primitive's
+    /// light form (#750): `b.v`, an `attr_reader` whose site alternates
+    /// between receivers of two shapes, misses and fills its cache at every
+    /// call, and `@w` is read through the view after it, every allocation
+    /// collecting. A view still pointed at the caches as they were before the
+    /// fill would be read through a stale borrow, which miri reports.
+    #[test]
+    fn a_float_frame_reads_ivars_after_an_attr_reader_fills_its_cache_under_miri() {
+        use crate::bytecode::{BlockRef, CallSite};
+        let rounds: i64 = if cfg!(miri) { 3 } else { 30 };
+        let site = |name: u32, argc: u16, implicit_self: bool| CallSite {
+            name,
+            argc,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self,
+            variable_call: false,
+            kwsplat: false,
+        };
+        // def m(a) = (s = 0.0; i = 0; while i < 4; b = a[i];
+        //   s = s + @w; s = s + b.v; s = s + @w; i += 1; end; s)
+        let m = Arc::new(Iseq {
+            name: "m".into(),
+            insns: vec![
+                Insn::PushFloat(0.0f64.to_bits()),
+                Insn::SetLocal(1, 0),
+                Insn::PushInt(0),
+                Insn::SetLocal(2, 0),
+                // while i < 4
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(4),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(22),
+                // b = a[i]
+                Insn::GetLocal(0, 0),
+                Insn::GetLocal(2, 0),
+                Insn::Send(0),
+                Insn::SetLocal(3, 0),
+                // s = s + @w
+                Insn::GetLocal(1, 0),
+                Insn::GetIvar(0, 2),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(1, 0),
+                // s = s + b.v
+                Insn::GetLocal(1, 0),
+                Insn::GetLocal(3, 0),
+                Insn::Send(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(1, 0),
+                // s = s + @w, through the view after the reader's fill
+                Insn::GetLocal(1, 0),
+                Insn::GetIvar(0, 3),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(1, 0),
+                // i += 1
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(2, 0),
+                Insn::Jump(-26),
+                Insn::GetLocal(1, 0),
+                Insn::Leave,
+            ],
+            symbols: vec!["@w".into(), "[]".into(), "v".into()],
+            locals: vec!["a".into(), "s".into(), "i".into(), "b".into()],
+            call_sites: vec![site(1, 1, false), site(2, 0, false)],
+            ivar_sites: 2,
+            max_stack: 3,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // @w = 1.0; @v = 0.5; a = [self, O, self, O]; k = 0
+        // while k < rounds; r = m(a); k += 1; end; r
+        let program = Iseq {
+            name: "<test>".into(),
+            insns: vec![
+                Insn::PushFloat(1.0f64.to_bits()),
+                Insn::SetIvar(1, 1),
+                Insn::PushFloat(0.5f64.to_bits()),
+                Insn::SetIvar(2, 2),
+                Insn::PushSelf,
+                Insn::GetConst(3, ConstScope::Top, 3),
+                Insn::PushSelf,
+                Insn::GetConst(3, ConstScope::Top, 4),
+                Insn::NewArray(4),
+                Insn::SetLocal(0, 0),
+                Insn::PushInt(0),
+                Insn::SetLocal(2, 0),
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(rounds),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(9),
+                Insn::PushSelf,
+                Insn::GetLocal(0, 0),
+                Insn::Send(0),
+                Insn::SetLocal(1, 0),
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(2, 0),
+                Insn::Jump(-13),
+                Insn::GetLocal(1, 0),
+                Insn::Leave,
+            ],
+            symbols: vec!["m".into(), "@w".into(), "@v".into(), "O750".into()],
+            locals: vec!["a".into(), "r".into(), "k".into()],
+            call_sites: vec![site(0, 1, true)],
+            ivar_sites: 2,
+            const_sites: 2,
+            max_stack: 4,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(3);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let object = Builtin::Object.id();
+        let name = crate::shared::symbols::intern("m");
+        let body = scope
+            .definitions_mut()
+            .intern_iseq(&m, Arc::as_ptr(&m) as usize);
+        scope.classes_mut().define_method(object, name, body);
+        // `attr_reader :v` on Object: the main object holds `@w` then `@v`,
+        // and `O750` holds `@v` alone, so the two keep it at two indexes.
+        let v = crate::shared::symbols::intern("v");
+        let ivar = crate::shared::symbols::intern("@v");
+        let reader = scope
+            .definitions_mut()
+            .add(Definition::Native(Native::IvarReader(ivar)));
+        scope.classes_mut().define_method(object, v, reader);
+        let other = allocate_instance(&mut scope, object).expect("an Object");
+        ivar_set(
+            &mut scope,
+            other,
+            ivar,
+            Value::flonum(2.5).expect("a flonum"),
+        )
+        .expect("a plain object takes an ivar");
+        scope.const_set(object, crate::shared::symbols::intern("O750"), other);
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        // Each pass: @w twice and b.v, 0.5 for the main object, 2.5 for O750.
+        assert_eq!(inspect(&mut scope, value), "14.0");
     }
 
     /// What `fuse` writes a `GetLocalPushIntBinOp` for is what the light

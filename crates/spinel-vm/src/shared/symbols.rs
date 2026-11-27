@@ -143,6 +143,55 @@ pub fn always_private() -> &'static [SymbolId; 5] {
     IDS.get_or_init(|| ALWAYS_PRIVATE.map(intern))
 }
 
+/// The ids of [`MATH_FLOAT`], memoised as [`class_id_ivar`] is: the light
+/// form of `__math__(:sqrt, x)` finds its operation by the id it is passed,
+/// rather than by the name's bytes read under the table's lock at every
+/// call, two atomic operations each `Math.sqrt` (#750).
+#[must_use]
+pub fn math_float() -> &'static [SymbolId; MATH_FLOAT.len()] {
+    static IDS: OnceLock<[SymbolId; MATH_FLOAT.len()]> = OnceLock::new();
+    IDS.get_or_init(|| MATH_FLOAT.map(intern))
+}
+
+/// The operations of `__math__` whose answer is one Float, `interp.rs`'s
+/// `math_float`'s names, the ones Ruby code calls most first. A name it
+/// answers that is missing here is still answered, by the primitive's own
+/// arm rather than its light form.
+pub const MATH_FLOAT: [&str; 32] = [
+    "sqrt",
+    "sin",
+    "cos",
+    "atan2",
+    "exp",
+    "log",
+    "hypot",
+    "pow",
+    "tan",
+    "atan",
+    "asin",
+    "acos",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "expm1",
+    "log2",
+    "log10",
+    "log1p",
+    "cbrt",
+    "floor",
+    "ceil",
+    "round",
+    "round_even",
+    "erf",
+    "erfc",
+    "gamma",
+    "ldexp",
+    "nextafter",
+];
+
 /// The method names Ruby makes private on definition, whatever the scope's
 /// default visibility: `rb_method_entry_make`'s list.
 pub const ALWAYS_PRIVATE: [&str; 5] = [
