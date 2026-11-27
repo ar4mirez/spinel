@@ -142,6 +142,8 @@ pub struct NativePlan {
     /// `class`'s object, the guard on the receiver's header, as
     /// [`Direct::class_object`] is.
     pub class_object: Value,
+    /// `class`'s serial when the entry was filled, as [`Direct::serial`].
+    pub serial: u64,
     /// The name the site calls, which a refinement is looked up by.
     pub name: SymbolId,
     /// How many arguments the site passes, above its receiver.

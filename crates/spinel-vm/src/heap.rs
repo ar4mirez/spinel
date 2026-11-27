@@ -206,6 +206,10 @@ const _: () = {
 /// makes, [`HandleScope::cached_set_ivar`]'s or [`IvarView::write`]'s,
 /// overwrites a slot of storage that stays where it was, in the shape it
 /// had, and a read through the view after it reads the slot as it is then.
+/// Nor does a primitive's light form a stretch answers in place, but for an
+/// `attr_reader`'s miss, which fills that site's cache: the view is then
+/// pointed at the caches again ([`HandleScope::refresh_ivar_view`]) rather
+/// than made again.
 pub(crate) struct IvarView {
     /// The object's shape, or [`IvarView::NOTHING`] when its instance
     /// variables are not in storage of its own: then nothing is answered.
@@ -229,7 +233,8 @@ impl IvarView {
     /// Nothing may have allocated, collected, assigned an instance variable
     /// other than through [`HandleScope::cached_set_ivar`], or filled a
     /// cache since [`HandleScope::ivar_view`] made this view, on the heap it
-    /// was made from.
+    /// was made from — or since [`HandleScope::refresh_ivar_view`] last
+    /// pointed it at the caches, for a cache filled.
     #[inline(always)]
     pub(crate) unsafe fn read(&self, slot: u32) -> Option<Value> {
         let slot = slot as usize;
@@ -3658,6 +3663,17 @@ impl<'h> HandleScope<'h> {
         view.values = values.slots();
         view.len = storage.len as usize;
         view
+    }
+
+    /// `view` pointed at the sites' caches as they are now, after a cache
+    /// was filled, or may have been, since [`HandleScope::ivar_view`] made
+    /// it: what [`IvarView::read`] and [`IvarView::write`] then ask is that
+    /// nothing else in their promise happened since it was made.
+    #[inline(always)]
+    pub(crate) fn refresh_ivar_view(&self, view: &mut IvarView) {
+        let caches = self.heap.call_caches.ivars();
+        view.caches = caches.as_ptr();
+        view.caches_len = caches.len();
     }
 
     /// What the [`Insn::GetIvar`] site whose cache is `slot` reads from
