@@ -66,7 +66,7 @@ Target size: under 30 MB. No libruby. OpenSSL is the system's, linked for the `o
 | crate | used for |
 |---|---|
 | `ruby-prism` | parsing |
-| `cranelift-codegen`, `cranelift-frontend` | JIT (phase 6) |
+| `cranelift-codegen`, `cranelift-frontend`, `cranelift-jit`, `cranelift-module`, `cranelift-native` | JIT (phase 6) |
 | `corosensei` | stackful coroutines for fibers when a primitive must re-enter the interpreter |
 | `libffi` | `Spinel::FFI` |
 | `openssl-sys` | the `openssl` built-in, on the system's OpenSSL 3 |

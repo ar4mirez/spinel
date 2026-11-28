@@ -21,7 +21,7 @@ CRuby carries thirty years of decisions that a new engine does not have to: a C 
 
 Spinel starts with shapes for instance variables, a precise GC per heap, a Ractor-native heap design, and a core library in Ruby that anyone can read and improve. The GC is non-moving mark-sweep today; a generational, moving GC is planned ([#126](https://github.com/ar4mirez/spinel/issues/126)), and nothing in the design stops it from moving objects.
 
-The bet is that this design, plus a JIT built on Cranelift, ends up faster than CRuby with YJIT on real programs while running the same code. That is a goal, not a result: there is no JIT yet ([phase 6](roadmap.md#phase-6-jit-and-gc)), and the interpreter's numbers against CRuby are in [`bench/README.md`](../bench/README.md).
+The bet is that this design, plus a JIT built on Cranelift, ends up faster than CRuby with YJIT on real programs while running the same code. That is a goal, not a result: the JIT has only started and makes nothing faster yet ([phase 6](roadmap.md#phase-6-jit-and-gc)), and the interpreter's numbers against CRuby are in [`bench/README.md`](../bench/README.md).
 
 ## Non-goals
 
