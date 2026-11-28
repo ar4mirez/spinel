@@ -9,6 +9,15 @@ bytecode a tool reads.
 
 ### Added
 
+- **The JIT's first slice: bytecode lowered to Cranelift**
+  ([#120](https://github.com/ar4mirez/spinel/issues/120)). With
+  `SPINEL_JIT=force` set, `spinel run` compiles every body the first time it
+  runs, from the same bytecode the interpreter runs: constants, locals,
+  jumps and fixnum arithmetic and comparisons are machine code, and every
+  other instruction, or an operand or answer those do not take, hands the
+  frame back to the interpreter at that instruction. Answers are the
+  interpreter's; nothing is faster yet. Unset, nothing changes.
+
 - **`IO::Buffer` and the Fiber scheduler**
   ([#797](https://github.com/ar4mirez/spinel/issues/797)). `IO::Buffer`
   is CRuby 4.0's: internal, mapped (`mmap(2)`, shared across `fork` or

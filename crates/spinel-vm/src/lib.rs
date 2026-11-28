@@ -95,6 +95,7 @@ pub mod iobuf;
 pub mod iso2022jp;
 pub mod jis;
 pub mod jis_table;
+pub mod jit;
 pub mod json;
 pub mod method;
 pub mod mt;

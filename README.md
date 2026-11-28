@@ -9,7 +9,7 @@ Spinel runs Ruby programs on its own virtual machine and does the work you would
 **Early and experimental. v0.1.0 is the first release.** It is not ready for production use.
 
 - **What works.** Ordinary Ruby programs run, and most of ruby/spec passes. The pass counts for each directory are in [`bench/spec-status.md`](bench/spec-status.md), which CI regenerates; nothing is marked as an expected failure. Sinatra apps install from rubygems.org and serve requests.
-- **Performance.** There is no JIT yet, so Spinel is an interpreter, and it is slower than CRuby's own interpreter on most of the benchmarks measured. See [`bench/README.md`](bench/README.md) for the numbers.
+- **Performance.** The JIT has only started: behind `SPINEL_JIT=force` it compiles a few instructions and makes nothing faster yet ([#120](https://github.com/ar4mirez/spinel/issues/120)), so Spinel is an interpreter, and it is slower than CRuby's own interpreter on most of the benchmarks measured. See [`bench/README.md`](bench/README.md) for the numbers.
 - **Not yet:** Rails ([#130](https://github.com/ar4mirez/spinel/issues/130), [#131](https://github.com/ar4mirez/spinel/issues/131)), the Cranelift JIT ([#120](https://github.com/ar4mirez/spinel/issues/120)–[#125](https://github.com/ar4mirez/spinel/issues/125)), a generational moving GC ([#126](https://github.com/ar4mirez/spinel/issues/126)), CRuby C extensions (never: see [Compatibility](#compatibility)), Windows ([#139](https://github.com/ar4mirez/spinel/issues/139)), `spinel fmt` and `spinel lint` ([#136](https://github.com/ar4mirez/spinel/issues/136), [#137](https://github.com/ar4mirez/spinel/issues/137)).
 
 Planned work is in [`docs/roadmap.md`](docs/roadmap.md) and the [milestones](https://github.com/ar4mirez/spinel/milestones).

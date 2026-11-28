@@ -546,6 +546,9 @@ pub struct Heap {
     /// one `eval` of a String is refused.
     parser: Option<Parser>,
     prism: Option<PrismApi>,
+    /// The JIT (#120), when one is installed: see [`crate::jit`]. Boxed, as
+    /// most heaps have none.
+    pub(crate) jit: Option<Box<crate::jit::Jit>>,
     /// Where `require` keeps compiled files (#40): the project's
     /// `.spinel/bytecode/`, which `shims/setup.rb` registers. `None` outside
     /// a project, and then nothing is read or written.
@@ -989,6 +992,7 @@ impl Heap {
         heap.budget = self.budget;
         heap.parser = self.parser;
         heap.prism = self.prism;
+        heap.jit = self.jit.as_ref().map(|jit| Box::new(jit.fresh()));
         heap.libraries = self.libraries;
         heap.bytecode_cache = self.bytecode_cache.clone();
         heap.frozen_string_literal = self.frozen_string_literal;
@@ -1066,6 +1070,7 @@ impl Heap {
             main: Value::NIL,
             parser: None,
             prism: None,
+            jit: None,
             bytecode_cache: None,
             require_map: None,
             libraries: None,
@@ -3038,6 +3043,28 @@ impl<'h> HandleScope<'h> {
 
     pub fn frozen_string_literal(&self) -> Option<bool> {
         self.heap.frozen_string_literal
+    }
+
+    /// Compile every body this heap runs from now on, on its first entry,
+    /// with the backend `factory` makes (#120), and a new Ractor's heap with
+    /// one of its own. There is no threshold yet: installing it is forcing
+    /// it.
+    pub fn set_jit(&mut self, factory: crate::jit::Factory) {
+        self.heap.jit = Some(Box::new(crate::jit::Jit::new(factory)));
+    }
+
+    /// What the JIT has done in this heap, or `None` when none is installed.
+    #[must_use]
+    pub fn jit_stats(&self) -> Option<crate::jit::Stats> {
+        self.heap.jit.as_ref().map(|jit| jit.stats())
+    }
+
+    pub(crate) fn jit_installed(&self) -> bool {
+        self.heap.jit.is_some()
+    }
+
+    pub(crate) fn jit_mut(&mut self) -> Option<&mut crate::jit::Jit> {
+        self.heap.jit.as_deref_mut()
     }
 
     pub fn set_parser(&mut self, parser: Parser) {
