@@ -20302,11 +20302,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
     }
 }
 
-/// Which [`BinOp`]s a fixnum on the left (`which` 0) or a Float (`which` 1)
-/// may answer itself in `frame`, as a mask over `op as usize`:
-/// [`operator_fast_path`]'s answer for every operator at once, for a run of
-/// instructions that cannot change it. `!=` is answered as `==` is, which is
-/// [`operator_guard`]'s rule.
 /// Run the compiled code of `frame`, the frame on top, which has run nothing
 /// yet (#120): answers the `pc` the loop goes on at, having charged `budget`
 /// for what ran and pushed the operands the code left, or `None` when nothing
@@ -20333,9 +20328,9 @@ fn jit_enter(
     {
         return None;
     }
+    let entry = scope.jit_mut()?.entry(frame.cache_base, iseq)?;
     let ops = native_ops(scope, frame, 0);
     let jit = scope.jit_mut()?;
-    let entry = jit.entry(frame.cache_base, iseq)?;
     let room = iseq.max_stack.max(1);
     if jit.scratch.len() < room {
         jit.scratch.resize(room, Value::NIL);
@@ -20374,6 +20369,11 @@ fn jit_enter(
     usize::try_from(pc).ok()
 }
 
+/// Which [`BinOp`]s a fixnum on the left (`which` 0) or a Float (`which` 1)
+/// may answer itself in `frame`, as a mask over `op as usize`:
+/// [`operator_fast_path`]'s answer for every operator at once, for a run of
+/// instructions that cannot change it. `!=` is answered as `==` is, which is
+/// [`operator_guard`]'s rule.
 fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
     let classes = scope.classes();
     let native = if classes.cref_refined(frame.cref) {
