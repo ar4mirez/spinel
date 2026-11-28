@@ -63,7 +63,11 @@ struct Entry {
 /// which no object holding an instance variable wears.
 ///
 /// [`Insn::GetIvar`]: crate::bytecode::Insn::GetIvar
+///
+/// `repr(C)`, as compiled code reads it at [`crate::jit::IVAR_ENTRY_SHAPE`]
+/// and [`crate::jit::IVAR_ENTRY_INDEX`].
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct IvarEntry {
     pub shape: ShapeId,
     pub index: u16,

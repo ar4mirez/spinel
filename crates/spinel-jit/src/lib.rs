@@ -22,7 +22,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
 use spinel_vm::Iseq;
 use spinel_vm::heap::HandleScope;
-use spinel_vm::jit::{Compiler, Entry};
+use spinel_vm::jit::{Compiled, Compiler, Entry};
 
 /// Give `scope`'s heap the JIT, forced on: every body is compiled the first
 /// time a frame of it is entered. A new Ractor's heap gets one of its own.
@@ -80,7 +80,7 @@ impl Backend {
 }
 
 impl Compiler for Backend {
-    fn compile(&mut self, iseq: &Iseq) -> Option<Entry> {
+    fn compile(&mut self, iseq: &Iseq) -> Option<Compiled> {
         let plan = lower::plan(iseq)?;
         let module = self.module.as_mut()?;
         let signature = codegen::signature(module.isa().default_call_conv());
@@ -99,7 +99,12 @@ impl Compiler for Backend {
         // the host's default calling convention, which `extern "C"` is. It
         // lives as long as `module`, which this backend keeps until the heap
         // is dropped, after the last frame that could run it.
-        Some(unsafe { std::mem::transmute::<*const u8, Entry>(code) })
+        let entry = unsafe { std::mem::transmute::<*const u8, Entry>(code) };
+        Some(Compiled {
+            entry,
+            env_depth: plan.env_depth,
+            ivars: plan.ivars,
+        })
     }
 }
 
