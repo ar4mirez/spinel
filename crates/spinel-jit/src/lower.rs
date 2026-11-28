@@ -260,10 +260,10 @@ pub enum Coverage {
 }
 
 /// Every [`Insn`], by name, with how far it is lowered and the rule: the
-/// table #120 asks for. The test's name for an instruction is a `match`
-/// with no catch-all, so a new one does not compile until it has a name, a
-/// row here and a sample, and the test holds each row to what [`lower`]
-/// does.
+/// table #120 asks for. A new instruction is a compile error in [`lower`]
+/// and in the test's name for it until it is decided and named; the test
+/// then fails when a sample has no row here, a row has no sample, a row is
+/// listed twice or [`lower`] disagrees with a row's class.
 pub const COVERAGE: &[(&str, Coverage, &str)] = {
     use Coverage::{Bails, Fused, Lowered, Partly};
     const CALLS: &str = "may call, allocate, raise or change the frames";
@@ -744,7 +744,7 @@ mod tests {
     }
 
     /// An instruction's `COVERAGE` name. No catch-all: a new `Insn` is a
-    /// compile error here until it has a name, and so a row and a sample.
+    /// compile error here until it is named.
     fn name(insn: Insn) -> &'static str {
         match insn {
             Insn::PushNil => "PushNil",
