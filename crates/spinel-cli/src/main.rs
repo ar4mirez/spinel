@@ -1776,6 +1776,13 @@ fn run_program(
     scope.set_argv(&path.to_string_lossy(), args);
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
+    // `SPINEL_JIT=force` (#120): from here on every body is compiled the
+    // first time it runs, the core library's methods too. No threshold and
+    // no `--jit` yet: those are #121's. Unset, nothing is compiled and
+    // nothing changes.
+    if std::env::var_os("SPINEL_JIT").is_some_and(|mode| mode == "force") {
+        spinel_jit::install(&mut scope);
+    }
     spinel_vm::signal::install_ruby_defaults();
     scope.set_frozen_string_literal(frozen_string_literal);
     library_path(&mut scope);

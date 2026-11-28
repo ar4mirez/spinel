@@ -374,6 +374,7 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 ## Phase 6: JIT and GC
 
 - Cranelift lowering of the interpreter's bytecode, call-count tiering, guards and deopt, inline caches consumed at compile time, stack maps for the GC. *Check:* full ruby/spec run with `--jit` forced on every method produces the same results; yjit-bench headline set faster than `ruby --yjit`.
+- **Started Cranelift lowering (#120):** `spinel-jit` lowers the same bytecode the interpreter runs, a body at a time on its first entry, behind `SPINEL_JIT=force`: constants, `self`, locals, `Pop`/`Dup`, every jump, and fixnum `+ - < <= > >= == !=` under the operator mask; every other instruction, and any operand or answer those do not take, is an explicit bail-out to the interpreter at that instruction. Compiled code charges the budget instruction for instruction. *Check:* `crates/spinel-jit/tests/differential.rs`, the same programs and `eval.txt` with and without the JIT; ruby/spec unchanged with it off (`docs/engine.md`, "Built so far for Cranelift lowering").
 - Generational, moving GC with the existing handle discipline. *Check:* same spec run; allocation-heavy benchmarks improve.
 
 ## Phase 7: Rails and reach

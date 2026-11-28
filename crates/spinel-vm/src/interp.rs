@@ -2698,6 +2698,11 @@ fn run<'h>(
     // `u64::MAX` is no budget at all: what `spinel run` asks for, since a
     // program is allowed to run for as long as it runs.
     let mut budget = scope.budget().unwrap_or(u64::MAX);
+    // Whether a JIT is installed (#120): asked once, since one is installed
+    // before the program runs. It keeps the loop off `run_calls`, which
+    // pushes and pops frames without the frame-change block below, where a
+    // frame's compiled code is entered.
+    let jit = scope.jit_installed();
 
     // The refusal boundaries on the stack, innermost last, as
     // `(frame index, frame id, budget deadline)`. Refreshed only when the frame
@@ -2939,6 +2944,23 @@ fn run<'h>(
                 };
                 limit = deadline.max(slice_end).max(trace_floor).max(tp_floor);
                 reload!();
+                // A frame that has run nothing yet runs its compiled code
+                // first, when a JIT is installed (#120), and the loop goes on
+                // where that bailed out.
+                if jit
+                    && cur_pc == 0
+                    && let Some(pc) = jit_enter(
+                        scope,
+                        &mut stack,
+                        &frames[frames.len() - 1],
+                        &mut budget,
+                        limit,
+                    )
+                {
+                    cur_pc = pc;
+                    sync_out!();
+                    continue;
+                }
             }
             budget = budget.saturating_sub(1);
             if budget <= limit {
@@ -3130,6 +3152,7 @@ fn run<'h>(
                     && !scope.tracing_allocations()
                     && !scope.has_pending_finalizers()
                     && !threads::turn_owed(scope)
+                    && !jit
                 {
                     let ran = run_calls(
                         scope,
@@ -20284,6 +20307,73 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
 /// [`operator_fast_path`]'s answer for every operator at once, for a run of
 /// instructions that cannot change it. `!=` is answered as `==` is, which is
 /// [`operator_guard`]'s rule.
+/// Run the compiled code of `frame`, the frame on top, which has run nothing
+/// yet (#120): answers the `pc` the loop goes on at, having charged `budget`
+/// for what ran and pushed the operands the code left, or `None` when nothing
+/// ran compiled and nothing changed. See [`crate::jit`].
+///
+/// `limit` is the loop's: the budget at or below which an instruction takes
+/// the slow step, which compiled code never runs.
+fn jit_enter(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    budget: &mut u64,
+    limit: u64,
+) -> Option<usize> {
+    // The instructions the loop would run before its next slow step: the
+    // k-th runs at `budget - k`, and the slow step is at `limit`.
+    let fuel = budget.saturating_sub(limit).saturating_sub(1);
+    let iseq = &*frame.iseq;
+    if fuel == 0
+        || frame.pc != 0
+        || !frame.locals_on_stack
+        || stack.len() != frame.base
+        || frame.base - frame.floor != iseq.locals.len()
+    {
+        return None;
+    }
+    let ops = native_ops(scope, frame, 0);
+    let jit = scope.jit_mut()?;
+    let entry = jit.entry(frame.cache_base, iseq)?;
+    let room = iseq.max_stack.max(1);
+    if jit.scratch.len() < room {
+        jit.scratch.resize(room, Value::NIL);
+    }
+    let locals = &mut stack.values[frame.floor..frame.base];
+    let mut activation = crate::jit::Activation {
+        locals: locals.as_mut_ptr(),
+        operands: jit.scratch.as_mut_ptr(),
+        receiver: frame.receiver,
+        ops: u64::from(ops),
+        fuel,
+        ran: 0,
+        depth: 0,
+    };
+    // SAFETY: `locals` is the frame's `Iseq::locals.len()` locals and
+    // `operands` at least `Iseq::max_stack` values, both borrowed mutably
+    // here and touched by nothing else until the call returns, and the
+    // backend made `entry` for this body: see `jit::Entry`.
+    let pc = unsafe { entry(&raw mut activation) };
+    let depth = usize::try_from(activation.depth).unwrap_or(usize::MAX);
+    assert!(
+        usize::try_from(pc).is_ok_and(|pc| pc < iseq.insns.len())
+            && depth <= room
+            && activation.ran <= fuel,
+        "compiled code for {} answered pc {pc}, depth {depth}, ran {} of {fuel}",
+        iseq.name,
+        activation.ran,
+    );
+    stack.values.extend_from_slice(&jit.scratch[..depth]);
+    *budget -= activation.ran;
+    jit.stats.entered += 1;
+    jit.stats.ran += activation.ran;
+    if activation.ran == 0 {
+        jit.stats.idle += 1;
+    }
+    usize::try_from(pc).ok()
+}
+
 fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
     let classes = scope.classes();
     let native = if classes.cref_refined(frame.cref) {
@@ -32994,5 +33084,149 @@ mod tests {
             let steps = slow(events);
             assert!(steps >= stepped, "{events}: {steps} stepped");
         }
+    }
+}
+
+/// The interpreter's side of the JIT (#120), under Miri: what `jit_enter`
+/// hands compiled code and what it does with the answer, with a Rust
+/// function standing in for Cranelift's code, since Miri runs no machine
+/// code of its own.
+#[cfg(test)]
+mod jit_tests {
+    use super::*;
+    use crate::jit::{Activation, Compiler, Entry};
+
+    /// `a = b; [a, a + b]`'s first three instructions, as compiled code
+    /// would run them: reads both locals, writes one, leaves one operand,
+    /// and bails at the fourth.
+    unsafe extern "C" fn three(activation: *mut Activation) -> u64 {
+        // SAFETY: `jit_enter` hands a valid activation, with two locals and
+        // room for at least one operand (`Entry`).
+        unsafe {
+            let activation = &mut *activation;
+            let b = *activation.locals.add(1);
+            *activation.locals = b;
+            *activation.operands = b;
+            activation.ran = 3;
+            activation.depth = 1;
+        }
+        3
+    }
+
+    struct Fake(Option<Entry>);
+
+    impl Compiler for Fake {
+        fn compile(&mut self, _iseq: &Iseq) -> Option<Entry> {
+            self.0
+        }
+    }
+
+    fn compiles() -> Option<Box<dyn Compiler>> {
+        Some(Box::new(Fake(Some(three))))
+    }
+
+    fn declines() -> Option<Box<dyn Compiler>> {
+        Some(Box::new(Fake(None)))
+    }
+
+    fn frame(iseq: Entered, cache_base: u32, base: usize) -> Call {
+        Call {
+            iseq,
+            cache_base,
+            env: Value::NIL,
+            locals_on_stack: true,
+            receiver: Value::NIL,
+            cref: CrefId::ROOT,
+            block: Value::NIL,
+            pc: 0,
+            floor: 0,
+            base,
+            keeps_receiver: false,
+            raises_receiver: false,
+            discards_value: false,
+            booleanizes_value: false,
+            scope_default: ScopeDefault::Public,
+            id: 1,
+            home: 1,
+            breaks: 0,
+            errinfo_on_entry: Value::NIL,
+            owner: None,
+            defined_as: None,
+            trace: 0,
+            returns_plainly: false,
+            rare: None,
+        }
+    }
+
+    #[test]
+    fn compiled_code_runs_on_the_frames_own_locals_under_miri() {
+        let body = Arc::new(Iseq {
+            name: "body".into(),
+            insns: vec![
+                Insn::GetLocal(1, 0),
+                Insn::Dup,
+                Insn::SetLocal(0, 0),
+                Insn::Leave,
+            ],
+            locals: vec!["a".into(), "b".into()],
+            max_stack: 2,
+            ..Iseq::default()
+        });
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let (base, entered) = scope.call_caches_mut().enter(&body);
+        let int = |n| Value::fixnum(n).unwrap();
+        let call = frame(entered, base, 2);
+        let mut stack = Stack::with_capacity(4);
+        stack.push(int(1));
+        stack.push(int(2));
+
+        // No JIT installed: nothing runs.
+        let mut budget = 100;
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+
+        scope.set_jit(compiles);
+        // No fuel: the next instruction is the loop's slow step.
+        let mut budget = 1;
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+        assert_eq!(scope.jit_stats().unwrap().compiled, 0, "not even compiled");
+
+        let mut budget = 100;
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            Some(3)
+        );
+        assert_eq!(&stack[..], &[int(2), int(2), int(2)]);
+        assert_eq!(budget, 97);
+        let stats = scope.jit_stats().unwrap();
+        assert_eq!((stats.compiled, stats.entered, stats.ran), (1, 1, 3));
+
+        // Not a frame that has run nothing: its operands are not empty.
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+
+        // A body the backend declines is asked about once.
+        scope.set_jit(declines);
+        stack.truncate(2);
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+        let stats = scope.jit_stats().unwrap();
+        assert_eq!((stats.compiled, stats.declined, stats.entered), (0, 1, 0));
+        assert_eq!(budget, 97);
     }
 }

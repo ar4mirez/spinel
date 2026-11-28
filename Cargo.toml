@@ -32,6 +32,13 @@ spinel-parse = { path = "crates/spinel-parse", version = "0.1.0" }
 spinel-regex = { path = "crates/spinel-regex", version = "0.1.0" }
 spinel-vm = { path = "crates/spinel-vm", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
+# The JIT (phase 6, #120). 0.121 is the newest whose `rust-version` the
+# workspace's allows.
+cranelift-codegen = "0.121"
+cranelift-frontend = "0.121"
+cranelift-jit = "0.121"
+cranelift-module = "0.121"
+cranelift-native = "0.121"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
@@ -39,6 +46,14 @@ unsafe_op_in_unsafe_fn = "warn"
 [workspace.lints.clippy]
 # The no-globals rule from CLAUDE.md, enforced by the compiler rather than by review.
 mut_from_ref = "deny"
+
+# Cranelift's code generator unoptimised makes a debug build's JIT, and so
+# `spinel-jit`'s tests, several times slower to compile each body.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.regalloc2]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

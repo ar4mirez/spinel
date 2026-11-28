@@ -8,7 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
+cranelift-native.workspace = true
 spinel-vm.workspace = true
+
+[dev-dependencies]
+spinel-core.workspace = true
+spinel-parse.workspace = true
 
 [lints]
 workspace = true
