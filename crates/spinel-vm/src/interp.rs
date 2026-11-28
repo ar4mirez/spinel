@@ -5187,6 +5187,12 @@ impl Stack {
     fn settle(&mut self) {
         self.low = self.values.len();
     }
+
+    /// Everything from `from` up is to be rooted again at the next look,
+    /// having been written in place since.
+    fn unsettle(&mut self, from: usize) {
+        self.low = self.low.min(from);
+    }
 }
 
 impl std::ops::Deref for Stack {
@@ -20398,6 +20404,13 @@ fn jit_enter(
         activation.ran,
     );
     stack.values.extend_from_slice(&jit.scratch[..depth]);
+    // A local the code wrote may now hold the only reference to a value it
+    // read from `self`'s instance variables or an enclosing scope, which no
+    // handle names: the loop roots the frame's locals again before the next
+    // instruction can collect.
+    if compiled.ivars || compiled.env_depth > 0 {
+        stack.unsettle(frame.floor);
+    }
     *budget -= activation.ran;
     jit.stats.entered += 1;
     jit.stats.ran += activation.ran;
@@ -33279,7 +33292,8 @@ mod jit_tests {
     /// What compiled code makes of the scope two out and of `self`'s `@a`,
     /// read and written through what `jit_enter` resolved: the outer
     /// local's value goes to `@a` and `@a`'s to the outer local, each where
-    /// its cache says, and `@a`'s old value is the one operand left.
+    /// its cache says, and `@a`'s old value goes to the frame's local and is
+    /// the one operand left.
     unsafe extern "C" fn outer_and_ivar(activation: *mut Activation) -> u64 {
         // SAFETY: `jit_enter` hands a valid activation, with the two scopes
         // out and `self`'s instance variables `Compiled` asked for, and room
@@ -33297,6 +33311,7 @@ mod jit_tests {
             let old = *slot;
             *slot = *far.values.add(1);
             *far.values.add(1) = old;
+            *activation.locals = old;
             *activation.operands = old;
             activation.ran = 2;
             activation.depth = 1;
@@ -33317,7 +33332,7 @@ mod jit_tests {
         let body = Arc::new(Iseq {
             name: "block".into(),
             insns: vec![Insn::GetIvar(0, 0), Insn::GetLocal(1, 2), Insn::Leave],
-            locals: vec![],
+            locals: vec!["x".into()],
             symbols: vec!["@a".into()],
             ivar_sites: 1,
             max_stack: 2,
@@ -33342,16 +33357,20 @@ mod jit_tests {
         let near_handle = scope.root(near);
         scope.set_jit(reaches_out);
 
-        let mut call = frame(entered, base, 0);
+        let mut call = frame(entered, base, 1);
         call.receiver = scope.get(receiver);
         call.env = scope.get(near_handle);
         let mut stack = Stack::with_capacity(4);
+        stack.push(Value::NIL);
+        stack.settle();
         let mut budget = 100;
         assert_eq!(
             jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
             Some(1)
         );
-        assert_eq!(&stack[..], &[int(7)]);
+        assert_eq!(&stack[..], &[int(7), int(7)]);
+        // The local the code wrote is rooted again with the operand.
+        assert_eq!(stack.fresh(), &[int(7), int(7)]);
         assert_eq!(budget, 98);
         assert_eq!(ivar_read(&mut scope, object, name).0, int(40));
         let far = scope.get(far_handle);
@@ -33359,7 +33378,7 @@ mod jit_tests {
 
         // A chain shorter than the code reads: nothing runs compiled.
         call.env = scope.get(far_handle);
-        stack.truncate(0);
+        stack.truncate(1);
         assert_eq!(
             jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
             None

@@ -328,6 +328,25 @@ fn instance_variables_through_the_inline_caches() {
 }
 
 #[test]
+fn a_heap_value_compiled_code_stores_in_a_local_outlives_a_collection() {
+    // `x` is the only reference left to the String once `@a` is cleared, and
+    // compiled code put it there; under `GC.stress` the next allocation
+    // collects, before the loop has rooted anything else.
+    agree_compiled(
+        "class H\n  def initialize(s)\n    @a = s\n  end\n  def take\n    x = @a\n    @a = nil\n    y = 'q' * 64\n    [x, x.size]\n  end\nend\n\
+         H.new('w' * 50).take\nh = H.new('z' * 100)\n50_000.times { |i| [i] }\n\
+         GC.stress = true\nr = h.take\nGC.stress = false\n[r[0] == 'z' * 100, r[1]]",
+        2,
+    );
+    // The same through an enclosing scope's local.
+    agree_compiled(
+        "def outer\n  o = 'k' * 80\n  r = nil\n  50_000.times { |i| [i] }\n  GC.stress = true\n  [1].each do\n    x = o\n    o = nil\n    y = 'q' * 64\n    r = [x == 'k' * 80, x.size]\n  end\n  GC.stress = false\n  r\nend\n\
+         [outer, outer]",
+        2,
+    );
+}
+
+#[test]
 fn threads_take_turns_through_compiled_loops() {
     agree_compiled(
         &format!(

@@ -22,9 +22,14 @@
 //!
 //! Since nothing in compiled code can collect, the values it moves between
 //! the frame's locals, the enclosing scopes' locals, `self`'s instance
-//! variables and its operand stack stay valid: each is an immediate, the
-//! frame's `self`, or a value one of those already held, which the frame
-//! keeps reachable.
+//! variables and its operand stack stay valid while it runs: each is an
+//! immediate, the frame's `self`, or a value one of those held on entry.
+//! Afterwards a local may hold the only reference to a value read from
+//! `self`'s instance variables or an enclosing scope, the place it came from
+//! having been overwritten, and no handle names it; so after code that reads
+//! either, `jit_enter` has the loop root the frame's locals again, as it
+//! roots the operands the code left, before the next instruction can
+//! collect.
 //!
 //! What compiled code reads beyond the frame, `jit_enter` resolves for it on
 //! entry with the heap's own accessors, as [`Compiled`] asks: the enclosing
@@ -58,8 +63,10 @@ use crate::value::Value;
 #[derive(Debug)]
 pub struct Activation {
     /// The frame's locals, [`Iseq::locals`]`.len()` of them: read, and
-    /// written only with a value from a local, [`Activation::receiver`], an
-    /// instance variable of it, or an immediate.
+    /// written only with a value from a local, an enclosing scope's local,
+    /// [`Activation::receiver`], an instance variable of it, or an
+    /// immediate. `jit_enter` roots them again after code that reads an
+    /// enclosing scope or an instance variable.
     pub locals: *mut Value,
     /// Where the operand stack the code leaves is written, from the bottom,
     /// [`Iseq::max_stack`] long.
