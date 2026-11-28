@@ -3703,6 +3703,50 @@ impl<'h> HandleScope<'h> {
         view
     }
 
+    /// [`HandleScope::ivar_view`] of `object` as compiled code reads it, for
+    /// a frame whose sites' caches start at `base` (#120): see
+    /// [`crate::jit::Ivars`] for how long it stays true.
+    pub(crate) fn jit_ivars(&self, object: Value, storage: usize, base: u32) -> crate::jit::Ivars {
+        let view = self.ivar_view(object, storage);
+        let caches = self.heap.call_caches.ivars();
+        let Some(caches) = caches.get(base as usize..) else {
+            return crate::jit::Ivars::NONE;
+        };
+        let writable = object.as_heap().is_some_and(|pointer| {
+            // SAFETY: a heap `Value` the caller holds reachable, as the
+            // frame's `self` is; one byte of its header.
+            let flags = unsafe { (*pointer.cast::<Header>().as_ptr()).flags };
+            flags & (FROZEN | CHILLED | CHILLED_SYMBOL) == 0
+        });
+        crate::jit::Ivars {
+            shape: u64::from(view.shape.0),
+            values: view.values.cast_mut(),
+            len: view.len as u64,
+            caches: caches.as_ptr(),
+            caches_len: caches.len() as u64,
+            writable: u64::from(writable),
+        }
+    }
+
+    /// The locals of `env`, a heap environment, as [`crate::jit::Locals`]:
+    /// its slots past the first `skip`, which hold its links. `None` for a
+    /// value that is not an object of slots, or has fewer than `skip`.
+    pub(crate) fn jit_locals(&self, env: Value, skip: usize) -> Option<crate::jit::Locals> {
+        let object = Obj(env.as_heap()?.cast());
+        // SAFETY: a heap `Value` the caller holds reachable is a live cell
+        // of this heap, and every cell starts with a header.
+        let header = unsafe { &*object.header() };
+        let len = (header.len as usize).checked_sub(skip)?;
+        if header.payload != Payload::Slots {
+            return None;
+        }
+        Some(crate::jit::Locals {
+            // In bounds: `skip` is below the object's length.
+            values: object.slots().wrapping_add(skip),
+            len: len as u64,
+        })
+    }
+
     /// `view` pointed at the sites' caches as they are now, after a cache
     /// was filled, or may have been, since [`HandleScope::ivar_view`] made
     /// it: what [`IvarView::read`] and [`IvarView::write`] then ask is that

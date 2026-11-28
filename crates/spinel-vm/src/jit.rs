@@ -21,9 +21,17 @@
 //! so every rule about leaving a frame stays the interpreter's.
 //!
 //! Since nothing in compiled code can collect, the values it moves between
-//! the frame's locals and its operand stack stay valid: each is an
-//! immediate, the frame's `self`, or a value a local already held, which the
-//! loop rooted when it arrived.
+//! the frame's locals, the enclosing scopes' locals, `self`'s instance
+//! variables and its operand stack stay valid: each is an immediate, the
+//! frame's `self`, or a value one of those already held, which the frame
+//! keeps reachable.
+//!
+//! What compiled code reads beyond the frame, `jit_enter` resolves for it on
+//! entry with the heap's own accessors, as [`Compiled`] asks: the enclosing
+//! scopes' locals ([`Activation::envs`]) and `self`'s instance variables
+//! beside the frame's sites' caches ([`Activation::ivars`]). So the heap's
+//! layout stays this crate's, and compiled code indexes only memory whose
+//! length it is handed, bailing out where the interpreter would look further.
 //!
 //! # The budget
 //!
@@ -50,8 +58,8 @@ use crate::value::Value;
 #[derive(Debug)]
 pub struct Activation {
     /// The frame's locals, [`Iseq::locals`]`.len()` of them: read, and
-    /// written only with a value from a local, [`Activation::receiver`] or an
-    /// immediate.
+    /// written only with a value from a local, [`Activation::receiver`], an
+    /// instance variable of it, or an immediate.
     pub locals: *mut Value,
     /// Where the operand stack the code leaves is written, from the bottom,
     /// [`Iseq::max_stack`] long.
@@ -59,7 +67,8 @@ pub struct Activation {
     /// The frame's `self`, for `PushSelf`.
     pub receiver: Value,
     /// Which of `Integer`'s operators answer here, by [`crate::BinOp`]
-    /// discriminant: the mask the light loops ask, for this frame.
+    /// discriminant, with `-@` at [`NEG_OPERATOR`]: the mask the light loops
+    /// ask, for this frame.
     pub ops: u64,
     /// How many instructions the code may run.
     pub fuel: u64,
@@ -67,7 +76,75 @@ pub struct Activation {
     pub ran: u64,
     /// Written by the code: how many values it wrote to `operands`.
     pub depth: u64,
+    /// [`Activation::ops`] for `Float`.
+    pub float_ops: u64,
+    /// The locals of the scopes around this one, [`Compiled::env_depth`] of
+    /// them: the `n`-th is what `GetLocal(_, n + 1)` reads. Null when the
+    /// body reads none.
+    pub envs: *const Locals,
+    /// `self`'s instance variables and the frame's sites' caches, when
+    /// [`Compiled::ivars`] asked for them; nothing answers otherwise.
+    pub ivars: Ivars,
 }
+
+/// `-@`'s bit in [`Activation::ops`] and [`Activation::float_ops`]: the one
+/// after the last [`crate::BinOp`].
+pub const NEG_OPERATOR: u32 = crate::BinOp::Ge as u32 + 1;
+
+/// One enclosing scope's locals, in its heap environment: `len` values from
+/// `values`, read and written in place as `GetLocal` and `SetLocal` do.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Locals {
+    pub values: *mut Value,
+    pub len: u64,
+}
+
+/// The view of `self` an interpreted `GetIvar` reads through
+/// ([`crate::heap::IvarView`]), as compiled code reads it: a site reads
+/// `values[index]` when its cache entry holds `shape` and `index` is below
+/// `len`, and writes there an immediate when `writable` is set too.
+///
+/// It stays true for as long as nothing allocates, collects, fills a cache
+/// or assigns an instance variable other than in place, which is all of a
+/// run of compiled code.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Ivars {
+    /// `self`'s shape, or one no cache entry holds when its instance
+    /// variables are not in storage of its own.
+    pub shape: u64,
+    pub values: *mut Value,
+    pub len: u64,
+    /// This frame's sites' caches, from its first: `caches_len` of them,
+    /// each [`IVAR_ENTRY_SIZE`] bytes.
+    pub caches: *const crate::callcache::IvarEntry,
+    pub caches_len: u64,
+    /// Whether `self` may be written: not frozen, nor chilled.
+    pub writable: u64,
+}
+
+impl Ivars {
+    /// Nothing to read or write: every site bails.
+    pub const NONE: Ivars = Ivars {
+        shape: 0,
+        values: std::ptr::null_mut(),
+        len: 0,
+        caches: std::ptr::null(),
+        caches_len: 0,
+        writable: 0,
+    };
+}
+
+/// The size of one instance-variable cache entry, and where its shape (a
+/// `u16`) and index (a `u16`) are in it.
+pub const IVAR_ENTRY_SIZE: usize = size_of::<crate::callcache::IvarEntry>();
+pub const IVAR_ENTRY_SHAPE: usize = std::mem::offset_of!(crate::callcache::IvarEntry, shape);
+pub const IVAR_ENTRY_INDEX: usize = std::mem::offset_of!(crate::callcache::IvarEntry, index);
+
+const _: () = {
+    assert!(size_of::<crate::shape::ShapeId>() == 2);
+};
 
 /// A body's compiled code: answers the `pc` to go on at.
 ///
@@ -80,7 +157,21 @@ pub struct Activation {
 /// them.
 pub type Entry = unsafe extern "C" fn(*mut Activation) -> u64;
 
-/// A backend: what makes a body's [`Entry`].
+/// What a backend made of a body: its code, and what [`Activation`] has to
+/// carry for it beyond what every body gets.
+#[derive(Debug, Clone, Copy)]
+pub struct Compiled {
+    pub entry: Entry,
+    /// How many scopes out the code reads or writes a local:
+    /// [`Activation::envs`]' length. A frame whose environment chain is
+    /// shorter runs interpreted.
+    pub env_depth: u16,
+    /// Whether the code reads or writes an instance variable:
+    /// [`Activation::ivars`].
+    pub ivars: bool,
+}
+
+/// A backend: what makes a body's [`Compiled`] code.
 ///
 /// One per heap, so per Ractor, as everything mutable is; the code it makes
 /// lives as long as it does.
@@ -88,7 +179,7 @@ pub trait Compiler: Send {
     /// Compile `iseq`, or `None` when there is nothing to run compiled: its
     /// first instruction is one the backend does not lower, or the host has
     /// no code generator.
-    fn compile(&mut self, iseq: &Iseq) -> Option<Entry>;
+    fn compile(&mut self, iseq: &Iseq) -> Option<Compiled>;
 }
 
 /// Makes a heap's [`Compiler`], on first use. A function rather than a
@@ -119,9 +210,11 @@ pub(crate) struct Jit {
     started: bool,
     /// By the body's call-cache base, which is unique to it in this heap
     /// (`CallCaches::enter`): `None` for a body compiled to nothing.
-    code: HashMap<u32, Option<Entry>>,
+    code: HashMap<u32, Option<Compiled>>,
     /// Where compiled code writes its operands, grown to the deepest body.
     pub(crate) scratch: Vec<Value>,
+    /// Where the enclosing scopes' locals are put for [`Activation::envs`].
+    pub(crate) envs: Vec<Locals>,
     pub(crate) stats: Stats,
 }
 
@@ -133,6 +226,7 @@ impl Jit {
             started: false,
             code: HashMap::new(),
             scratch: Vec::new(),
+            envs: Vec::new(),
             stats: Stats::default(),
         }
     }
@@ -147,7 +241,7 @@ impl Jit {
     }
 
     /// The body's code, compiling it the first time it is asked for.
-    pub(crate) fn entry(&mut self, base: u32, iseq: &Iseq) -> Option<Entry> {
+    pub(crate) fn entry(&mut self, base: u32, iseq: &Iseq) -> Option<Compiled> {
         if let Some(&known) = self.code.get(&base) {
             return known;
         }

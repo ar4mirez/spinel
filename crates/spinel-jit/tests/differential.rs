@@ -186,6 +186,148 @@ fn blocks_exceptions_ensure_and_early_returns() {
 }
 
 #[test]
+fn integer_multiplication_division_and_modulo_floor_and_bail_past_the_range() {
+    agree_compiled(
+        "def ops(a, b) = [a * b, a / b, a % b, -a]\n\
+         [ops(7, 2), ops(-7, 2), ops(7, -2), ops(-7, -2), ops(6, 3), ops(0, 5),\n\
+          ops(4611686018427387903, 1), ops(-4611686018427387904, 1)]",
+        80,
+    );
+    // Past the fixnum range: a Bignum, which the interpreter makes.
+    agree_compiled(
+        "def mul(a, b) = a * b\ndef div(a, b) = a / b\ndef neg(a) = -a\n\
+         [mul(4611686018427387903, 2), mul(3037000499, 3037000499), mul(-2147483648, 2147483648),\n\
+          div(-4611686018427387904, -1), neg(-4611686018427387904), neg(4611686018427387903)]",
+        12,
+    );
+    // A zero divisor raises in the interpreter.
+    agree_compiled(
+        "def div(a, b) = a / b\ndef mod(a, b) = a % b\n\
+         [(div(1, 0) rescue $!.message), (mod(1, 0) rescue $!.class), div(9, 4), mod(-9, 4)]",
+        6,
+    );
+    // A loop of them, compiled through.
+    agree_compiled(
+        "def digits(n)\n  s = 0\n  while n > 0\n    s = s * 3 + n % 10\n    n = n / 10\n  end\n  s\nend\n\
+         [digits(123456789), digits(4611686018427387903)]",
+        200,
+    );
+}
+
+#[test]
+fn float_arithmetic_on_flonums_and_the_doubles_that_need_the_heap() {
+    agree_compiled(
+        "def ops(a, b) = [a + b, a - b, a * b, a / b, a < b, a <= b, a > b, a >= b, a == b, a != b, -a]\n\
+         [ops(1.5, 2.25), ops(-3.0, 0.5), ops(2.0, 2.0), ops(1.0e10, 3.0e-5)]",
+        60,
+    );
+    // Answers no flonum holds: zero, minus zero, an infinity, NaN, the
+    // extremes. Bail-outs, to the interpreter's heap `Float`.
+    agree_compiled(
+        "def sub(a, b) = a - b\ndef mul(a, b) = a * b\ndef div(a, b) = a / b\ndef neg(a) = -a\n\
+         [sub(1.5, 1.5), neg(sub(1.5, 1.5)), mul(1.0e200, 1.0e200), div(1.0, 3.0e-300),\n\
+          mul(1.0e-200, 1.0e-200), (div(0.5, 0.0) rescue $!.class), neg(2.5), mul(-1.5, 0.0)]",
+        8,
+    );
+    // Mixed operands, `%`, and Floats past the band are the interpreter's.
+    agree_compiled(
+        "def add(a, b) = a + b\ndef mod(a, b) = a % b\ndef lt(a, b) = a < b\n\
+         [add(1, 2.5), add(2.5, 1), mod(7.5, 2.0), lt(1.0, 2), lt(1.0e300, 1.0e301), add(1.0e300, 1.0)]",
+        2,
+    );
+    agree_compiled(
+        "def norm(x, y, z)\n  i = 0\n  s = 0.0\n  while i < 100\n    s = s + x * x + y * y - z / 3.0\n    i += 1\n  end\n  s\nend\nnorm(1.5, 2.5, 0.75)",
+        2_000,
+    );
+}
+
+#[test]
+fn a_redefined_float_or_integer_operator_is_heard_by_compiled_code() {
+    agree_compiled(
+        "def f(a, b) = [a * b, a / b, -a]\nbefore = [f(1.5, 2.0), f(6, 4)]\n\
+         class Float\n  def *(o) = :times\n  def -@ = :neg\nend\n\
+         class Integer\n  def /(o) = :over\nend\n[before, f(1.5, 2.0), f(6, 4)]",
+        8,
+    );
+}
+
+#[test]
+fn symbols_floats_and_not_are_immediates() {
+    agree_compiled(
+        "def f(x) = [:a, :b, 2.5, -0.5, !x, !!x, x ? :yes : :no]\n\
+         [f(nil), f(false), f(0), f(:s), f(1.5), f('str'), f([])]",
+        20,
+    );
+    agree_compiled(
+        "class Odd\n  def ! = :odd\nend\ndef f(x) = !x\n[f(Odd.new), f(nil), f(1)]",
+        2,
+    );
+}
+
+#[test]
+fn a_blocks_enclosing_locals_are_read_and_written_in_place() {
+    agree("def sum(a)\n  s = 0\n  a.each { |x| s = s + x }\n  s\nend\nsum([1, 2, 3, 40])");
+    agree(
+        "def nest(n)\n  t = 0\n  n.times { |i| n.times { |j| t = t + i * j } }\n  t\nend\nnest(20)",
+    );
+    agree(
+        "def capture\n  x = 1\n  inc = -> { x = x + 1 }\n  get = -> { x }\n  inc.call\n  inc.call\n  [get.call, x]\nend\ncapture",
+    );
+    // A heap value written to an enclosing scope, then used there.
+    agree(
+        "def collect(a)\n  last = nil\n  a.each { |x| last = x }\n  [last, last.size]\nend\ncollect(['a', 'bb', 'ccc'])",
+    );
+    let stats = agree(
+        "def total(n)\n  t = 0\n  i = 0\n  [1] .each { while i < n\n    t = t + i\n    i = i + 1\n  end }\n  t\nend\ntotal(1_000)",
+    );
+    assert!(
+        stats.ran > 4_000,
+        "the block's loop ran compiled: {stats:?}"
+    );
+}
+
+#[test]
+fn instance_variables_through_the_inline_caches() {
+    let point = "class P\n  def initialize(x, y)\n    @x = x\n    @y = y\n  end\n\
+                 def norm = @x * @x + @y * @y\n  def move(d)\n    @x = @x + d\n    @y = @y - d\n    self\n  end\n\
+                 def x = @x\nend\n";
+    agree_compiled(
+        &format!("{point}p = P.new(3, 4)\n[p.norm, p.move(1).norm, p.move(1).move(2).norm, p.x]"),
+        20,
+    );
+    // A second shape at the same sites, a heap value written, an ivar never
+    // assigned, and a frozen receiver: each the interpreter's.
+    agree_compiled(
+        &format!(
+            "{point}class Q < P\n  def initialize(x, y)\n    @z = 0\n    super\n  end\nend\n\
+             a = P.new(1, 2)\nb = Q.new(1, 2)\n\
+             r = [a.norm, b.norm, a.norm, b.move(3).norm, a.move(1.5).norm]\n\
+             c = P.new('s', 't')\nr << (c.move(1) rescue $!.class)\n\
+             f = P.new(1, 1).freeze\nr << (f.move(1) rescue $!.class) << f.norm\nr"
+        ),
+        20,
+    );
+    agree_compiled(
+        "class C\n  def get = @never\n  def set(v)\n    @v = v\n    @v\n  end\nend\nc = C.new\n\
+         [c.get, c.set(1), c.set(:a), c.set('s'), c.set(2.5), c.set(nil), C.new.set(nil)]",
+        4,
+    );
+    // The first call fills the caches, at the bail-outs; the next run
+    // compiled through.
+    agree_compiled(
+        "class Acc\n  def initialize\n    @n = 0\n  end\n  def run(k)\n    i = 0\n    while i < k\n      @n = @n + i\n      i += 1\n    end\n    @n\n  end\nend\n\
+         a = Acc.new\n[a.run(1), a.run(500), a.run(10)]",
+        3_000,
+    );
+    // Every kind of immediate is written in place: a flonum, a symbol, nil.
+    agree_compiled(
+        "class W\n  def initialize\n    @f = 0.0\n    @s = nil\n  end\n  def run(k)\n    i = 0\n    while i < k\n      @f = @f + 0.5\n      @s = :x\n      @s = nil\n      i += 1\n    end\n    [@f, @s]\n  end\nend\n\
+         w = W.new\n[w.run(1), w.run(300)]",
+        3_000,
+    );
+}
+
+#[test]
 fn threads_take_turns_through_compiled_loops() {
     agree_compiled(
         &format!(

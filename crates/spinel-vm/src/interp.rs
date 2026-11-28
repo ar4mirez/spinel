@@ -20328,9 +20328,38 @@ fn jit_enter(
     {
         return None;
     }
-    let entry = scope.jit_mut()?.entry(frame.cache_base, iseq)?;
+    let compiled = scope.jit_mut()?.entry(frame.cache_base, iseq)?;
     let ops = native_ops(scope, frame, 0);
+    let float_ops = native_ops(scope, frame, 1);
+    let ivars = if compiled.ivars {
+        scope.jit_ivars(frame.receiver, SLOT_IVARS, frame.cache_base)
+    } else {
+        crate::jit::Ivars::NONE
+    };
+    // The scopes around this one, nearest first, as `env_local` walks them
+    // for a frame whose own locals are on the stack: a chain shorter than
+    // the code reads runs interpreted, which answers it as it always has.
+    let mut envs = std::mem::take(&mut scope.jit_mut()?.envs);
+    envs.clear();
+    let mut env = frame.env;
+    for level in 0..compiled.env_depth {
+        if level > 0 {
+            // The link in slot 0 of the one before, as `frame_local` reads
+            // it: that one is an object of slots past its link, as
+            // `jit_locals` found.
+            env = scope.slot_of(env, 0);
+        }
+        let Some(locals) = scope.jit_locals(env, ENV_HEADER) else {
+            break;
+        };
+        envs.push(locals);
+    }
+    let resolved = envs.len() == usize::from(compiled.env_depth);
     let jit = scope.jit_mut()?;
+    jit.envs = envs;
+    if !resolved {
+        return None;
+    }
     let room = iseq.max_stack.max(1);
     if jit.scratch.len() < room {
         jit.scratch.resize(room, Value::NIL);
@@ -20344,12 +20373,21 @@ fn jit_enter(
         fuel,
         ran: 0,
         depth: 0,
+        float_ops: u64::from(float_ops),
+        envs: if jit.envs.is_empty() {
+            std::ptr::null()
+        } else {
+            jit.envs.as_ptr()
+        },
+        ivars,
     };
     // SAFETY: `locals` is the frame's `Iseq::locals.len()` locals and
     // `operands` at least `Iseq::max_stack` values, both borrowed mutably
-    // here and touched by nothing else until the call returns, and the
-    // backend made `entry` for this body: see `jit::Entry`.
-    let pc = unsafe { entry(&raw mut activation) };
+    // here and touched by nothing else until the call returns; `envs` and
+    // `ivars` are what `jit_locals` and `jit_ivars` found just now, which
+    // nothing compiled code does can move; and the backend made `entry`
+    // for this body: see `jit::Entry`.
+    let pc = unsafe { (compiled.entry)(&raw mut activation) };
     let depth = usize::try_from(activation.depth).unwrap_or(usize::MAX);
     assert!(
         usize::try_from(pc).is_ok_and(|pc| pc < iseq.insns.len())
@@ -33094,7 +33132,7 @@ mod tests {
 #[cfg(test)]
 mod jit_tests {
     use super::*;
-    use crate::jit::{Activation, Compiler, Entry};
+    use crate::jit::{Activation, Compiled, Compiler, Entry};
 
     /// `a = b; [a, a + b]`'s first three instructions, as compiled code
     /// would run them: reads both locals, writes one, leaves one operand,
@@ -33113,16 +33151,24 @@ mod jit_tests {
         3
     }
 
-    struct Fake(Option<Entry>);
+    struct Fake(Option<Compiled>);
 
     impl Compiler for Fake {
-        fn compile(&mut self, _iseq: &Iseq) -> Option<Entry> {
+        fn compile(&mut self, _iseq: &Iseq) -> Option<Compiled> {
             self.0
         }
     }
 
+    fn plain(entry: Entry) -> Option<Compiled> {
+        Some(Compiled {
+            entry,
+            env_depth: 0,
+            ivars: false,
+        })
+    }
+
     fn compiles() -> Option<Box<dyn Compiler>> {
-        Some(Box::new(Fake(Some(three))))
+        Some(Box::new(Fake(plain(three))))
     }
 
     fn declines() -> Option<Box<dyn Compiler>> {
@@ -33228,5 +33274,96 @@ mod jit_tests {
         let stats = scope.jit_stats().unwrap();
         assert_eq!((stats.compiled, stats.declined, stats.entered), (0, 1, 0));
         assert_eq!(budget, 97);
+    }
+
+    /// What compiled code makes of the scope two out and of `self`'s `@a`,
+    /// read and written through what `jit_enter` resolved: the outer
+    /// local's value goes to `@a` and `@a`'s to the outer local, each where
+    /// its cache says, and `@a`'s old value is the one operand left.
+    unsafe extern "C" fn outer_and_ivar(activation: *mut Activation) -> u64 {
+        // SAFETY: `jit_enter` hands a valid activation, with the two scopes
+        // out and `self`'s instance variables `Compiled` asked for, and room
+        // for one operand (`Entry`).
+        unsafe {
+            let activation = &mut *activation;
+            let far = *activation.envs.add(1);
+            assert_eq!(far.len, 2);
+            let ivars = activation.ivars;
+            assert!(ivars.caches_len > 0 && ivars.writable == 1);
+            let entry = *ivars.caches;
+            assert_eq!(u64::from(entry.shape.0), ivars.shape);
+            assert!(u64::from(entry.index) < ivars.len);
+            let slot = ivars.values.add(usize::from(entry.index));
+            let old = *slot;
+            *slot = *far.values.add(1);
+            *far.values.add(1) = old;
+            *activation.operands = old;
+            activation.ran = 2;
+            activation.depth = 1;
+        }
+        1
+    }
+
+    fn reaches_out() -> Option<Box<dyn Compiler>> {
+        Some(Box::new(Fake(Some(Compiled {
+            entry: outer_and_ivar,
+            env_depth: 2,
+            ivars: true,
+        }))))
+    }
+
+    #[test]
+    fn compiled_code_reaches_enclosing_scopes_and_ivars_under_miri() {
+        let body = Arc::new(Iseq {
+            name: "block".into(),
+            insns: vec![Insn::GetIvar(0, 0), Insn::GetLocal(1, 2), Insn::Leave],
+            locals: vec![],
+            symbols: vec!["@a".into()],
+            ivar_sites: 1,
+            max_stack: 2,
+            ..Iseq::default()
+        });
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let int = |n| Value::fixnum(n).unwrap();
+        let (base, entered) = scope.call_caches_mut().enter(&body);
+        let object = allocate_instance(&mut scope, Builtin::Object.id()).unwrap();
+        let receiver = scope.root(object);
+        let name = crate::shared::symbols::intern("@a");
+        ivar_set(&mut scope, object, name, int(7)).unwrap();
+        let (_, found) = ivar_read(&mut scope, object, name);
+        let (shape, index) = found.expect("in storage of its own");
+        scope.call_caches_mut().fill_ivar(base, shape, index);
+        let far = env_alloc(&mut scope, Value::NIL, 2);
+        let far_handle = scope.root(far);
+        env_set(&mut scope, far, 1, int(40));
+        let near = env_alloc(&mut scope, far, 0);
+        let near_handle = scope.root(near);
+        scope.set_jit(reaches_out);
+
+        let mut call = frame(entered, base, 0);
+        call.receiver = scope.get(receiver);
+        call.env = scope.get(near_handle);
+        let mut stack = Stack::with_capacity(4);
+        let mut budget = 100;
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            Some(1)
+        );
+        assert_eq!(&stack[..], &[int(7)]);
+        assert_eq!(budget, 98);
+        assert_eq!(ivar_read(&mut scope, object, name).0, int(40));
+        let far = scope.get(far_handle);
+        assert_eq!(env_get(&mut scope, far, 1), int(7));
+
+        // A chain shorter than the code reads: nothing runs compiled.
+        call.env = scope.get(far_handle);
+        stack.truncate(0);
+        assert_eq!(
+            jit_enter(&mut scope, &mut stack, &call, &mut budget, 0),
+            None
+        );
+        assert_eq!(budget, 98);
     }
 }
