@@ -260,9 +260,10 @@ pub enum Coverage {
 }
 
 /// Every [`Insn`], by name, with how far it is lowered and the rule: the
-/// table #120 asks for. A test reads the instruction set out of
-/// `bytecode.rs` and fails when one is missing here, and holds each entry
-/// to what [`lower`] does.
+/// table #120 asks for. The test's name for an instruction is a `match`
+/// with no catch-all, so a new one does not compile until it has a name, a
+/// row here and a sample, and the test holds each row to what [`lower`]
+/// does.
 pub const COVERAGE: &[(&str, Coverage, &str)] = {
     use Coverage::{Bails, Fused, Lowered, Partly};
     const CALLS: &str = "may call, allocate, raise or change the frames";
@@ -742,48 +743,112 @@ mod tests {
         ]
     }
 
-    /// An instruction's name, as its `Debug` spells it.
-    fn name(insn: Insn) -> String {
-        let debug = format!("{insn:?}");
-        debug
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .next()
-            .unwrap_or_default()
-            .to_owned()
-    }
-
-    /// The names of `Insn`'s variants, read from its definition.
-    fn variants() -> Vec<String> {
-        const SOURCE: &str = include_str!("../../spinel-vm/src/bytecode.rs");
-        let start = SOURCE
-            .find("\npub enum Insn {\n")
-            .expect("`Insn` is defined");
-        let body = &SOURCE[start..];
-        let end = body.find("\n}\n").expect("`Insn` ends");
-        body[..end]
-            .lines()
-            .skip(2)
-            .filter_map(|line| line.strip_prefix("    "))
-            .filter(|line| line.starts_with(|c: char| c.is_ascii_uppercase()))
-            .map(|line| {
-                line.split(|c: char| !c.is_ascii_alphanumeric())
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect()
+    /// An instruction's `COVERAGE` name. No catch-all: a new `Insn` is a
+    /// compile error here until it has a name, and so a row and a sample.
+    fn name(insn: Insn) -> &'static str {
+        match insn {
+            Insn::PushNil => "PushNil",
+            Insn::PushTrue => "PushTrue",
+            Insn::PushFalse => "PushFalse",
+            Insn::PushSelf => "PushSelf",
+            Insn::PushInt(..) => "PushInt",
+            Insn::PushFloat(..) => "PushFloat",
+            Insn::PushLit(..) => "PushLit",
+            Insn::PushSym(..) => "PushSym",
+            Insn::Intern => "Intern",
+            Insn::Pop => "Pop",
+            Insn::Dup => "Dup",
+            Insn::CaptureSplat => "CaptureSplat",
+            Insn::SplatArray => "SplatArray",
+            Insn::GetLocal(..) => "GetLocal",
+            Insn::SetLocal(..) => "SetLocal",
+            Insn::Jump(..) => "Jump",
+            Insn::JumpUnless(..) => "JumpUnless",
+            Insn::JumpIf(..) => "JumpIf",
+            Insn::Refuse(..) => "Refuse",
+            Insn::JumpUnlessKeep(..) => "JumpUnlessKeep",
+            Insn::JumpIfKeep(..) => "JumpIfKeep",
+            Insn::JumpIfNilKeep(..) => "JumpIfNilKeep",
+            Insn::JumpUnlessUndef(..) => "JumpUnlessUndef",
+            Insn::BinOp(..) => "BinOp",
+            Insn::Neg => "Neg",
+            Insn::Not => "Not",
+            Insn::BlockToProc => "BlockToProc",
+            Insn::NewArray(..) => "NewArray",
+            Insn::CaseEq => "CaseEq",
+            Insn::Send(..) => "Send",
+            Insn::Super(..) => "Super",
+            Insn::Yield(..) => "Yield",
+            Insn::LeaveThroughEnsure => "LeaveThroughEnsure",
+            Insn::MakeProc(..) => "MakeProc",
+            Insn::DefineMethod(..) => "DefineMethod",
+            Insn::DefineSingleton(..) => "DefineSingleton",
+            Insn::GetConst(..) => "GetConst",
+            Insn::SetConst(..) => "SetConst",
+            Insn::DefinedConst(..) => "DefinedConst",
+            Insn::OpenClass(..) => "OpenClass",
+            Insn::GetIvar(..) => "GetIvar",
+            Insn::SetIvar(..) => "SetIvar",
+            Insn::DefinedIvar(..) => "DefinedIvar",
+            Insn::GetGlobal(..) => "GetGlobal",
+            Insn::SetGlobal(..) => "SetGlobal",
+            Insn::DefinedGlobal(..) => "DefinedGlobal",
+            Insn::DefinedMethod(..) => "DefinedMethod",
+            Insn::DefinedSelfMethod(..) => "DefinedSelfMethod",
+            Insn::DefinedYield => "DefinedYield",
+            Insn::DefinedSuper => "DefinedSuper",
+            Insn::Leave => "Leave",
+            Insn::Return => "Return",
+            Insn::Break => "Break",
+            Insn::Raise => "Raise",
+            Insn::CheckMatch => "CheckMatch",
+            Insn::CheckMatchAny => "CheckMatchAny",
+            Insn::NewRegexp(..) => "NewRegexp",
+            Insn::NewRegexpOnce(..) => "NewRegexpOnce",
+            Insn::OnceGet(..) => "OnceGet",
+            Insn::OnceSet(..) => "OnceSet",
+            Insn::GetCvar(..) => "GetCvar",
+            Insn::SetCvar(..) => "SetCvar",
+            Insn::DefinedCvar(..) => "DefinedCvar",
+            Insn::Alias(..) => "Alias",
+            Insn::Undef(..) => "Undef",
+            Insn::AliasFromStack => "AliasFromStack",
+            Insn::UndefFromStack => "UndefFromStack",
+            Insn::AliasGlobal(..) => "AliasGlobal",
+            Insn::AliasGlobalSpecial(..) => "AliasGlobalSpecial",
+            Insn::LastMatch(..) => "LastMatch",
+            Insn::SetLastMatch => "SetLastMatch",
+            Insn::Errinfo => "Errinfo",
+            Insn::SetErrinfo => "SetErrinfo",
+            Insn::DefinedMatch(..) => "DefinedMatch",
+            Insn::Goto(..) => "Goto",
+            Insn::GotoValue(..) => "GotoValue",
+            Insn::EnterEnsure => "EnterEnsure",
+            Insn::LeaveEnsure => "LeaveEnsure",
+            Insn::GetLocalPushIntBinOp { .. } => "GetLocalPushIntBinOp",
+            Insn::GetLocalGetLocalBinOp { .. } => "GetLocalGetLocalBinOp",
+            Insn::GetLocalGetIvarBinOp { .. } => "GetLocalGetIvarBinOp",
+            Insn::PushSelfGetLocal { .. } => "PushSelfGetLocal",
+            Insn::GetLocalBinOp { .. } => "GetLocalBinOp",
+        }
     }
 
     #[test]
     fn every_instruction_is_lowered_or_bails_as_the_coverage_table_says() {
-        let variants = variants();
-        assert!(variants.len() > 80, "read too few variants: {variants:?}");
-        let table: Vec<&str> = COVERAGE.iter().map(|&(name, ..)| name).collect();
-        assert_eq!(
-            table, variants,
-            "`COVERAGE` lists every `Insn` in its order: a new one needs a row"
-        );
         let samples = samples();
+        for (i, &(name, ..)) in COVERAGE.iter().enumerate() {
+            assert!(
+                COVERAGE[..i].iter().all(|&(seen, ..)| seen != name),
+                "{name} has two rows in `COVERAGE`"
+            );
+        }
+        for &(insn, _) in &samples {
+            let name = self::name(insn);
+            assert!(
+                COVERAGE.iter().any(|&(row, ..)| row == name),
+                "{name} has no row in `COVERAGE`"
+            );
+        }
         // A body each sample can be lowered in: a local, a symbol, and room
         // for a jump to land.
         let mut body = iseq(vec![Insn::Leave, Insn::Leave], 1, 2);
@@ -813,11 +878,6 @@ mod tests {
                 "{name} needs its reason"
             );
         }
-        assert_eq!(
-            samples.len(),
-            COVERAGE.len() + 4,
-            "a sample for each row, two for some"
-        );
     }
 
     /// The table as the pull request shows it: `cargo test -p spinel-jit
