@@ -3104,6 +3104,18 @@ def rp746(x); return x + 1 if x > 0; -x; end; def re746(x); begin; return x * 2 
 # plain one, and the return to it, each see their own (#746).
 module PlR746i; refine(Integer) { def +(o) = :refined }; end; class PlP746; def plain(a) = a + 1; def go(a) = [plain(a), plain(a)]; end; class PlQ746; using PlR746i; def ref(a) = a + 1; def go(a) = [ref(a), PlP746.new.plain(a), ref(a), a + 1]; end; [PlP746.new.go(1), PlQ746.new.go(1)]  #=> [[2, 2], [:refined, 2, :refined, :refined]]
 def pl_fib746(n) = n < 2 ? n : pl_fib746(n - 1) + pl_fib746(n - 2); class Integer; alias_method :pl_p746, :+; end; a = pl_fib746(10); class Integer; def +(o) = pl_p746(o).pl_p746(1000); end; b = pl_fib746(5); class Integer; alias_method :+, :pl_p746; end; [a, b, pl_fib746(10)]  #=> [55, 7005, 55]
+# A fused local-and-literal operator is written only for a literal that is a
+# fixnum, which its run then makes without asking; one past the range runs as
+# the three instructions it would stand for (#746).
+def fx746(n) = [n < 4611686018427387904, n - 4611686018427387904, n + -4611686018427387905, n > -4611686018427387905, n + 4611686018427387903, n - -4611686018427387904]; [fx746(1), fx746(2), fx746(1)]  #=> [[true, -4611686018427387903, -4611686018427387904, true, 4611686018427387904, 4611686018427387905], [true, -4611686018427387902, -4611686018427387903, true, 4611686018427387905, 4611686018427387906], [true, -4611686018427387903, -4611686018427387904, true, 4611686018427387904, 4611686018427387905]]
+# The call loop asks a body's flavour only when the running body changes or a
+# Float operator ran: a recursion that turns to Float arithmetic part way, and
+# calls between a Float body and an Integer one, keep their answers (#746).
+def fm746(n, x) = n == 0 ? x * 1.5 : fm746(n - 1, x) + n; [fm746(3, 2), fm746(3, 2.0), fm746(4, 2), fm746(2, 2.0)]  #=> [9.0, 9.0, 13.0, 6.0]
+def ff746(x) = x * 0.5; def fi746(n) = n < 1 ? ff746(n + 1.0) : fi746(n - 1) + ff746(2.0) + n; [fi746(3), fi746(0), fi746(2)]  #=> [9.5, 0.5, 5.5]
+# A plan's arguments placed over the receiver, for bodies with locals past
+# their parameters and with none (#746).
+def pa746(a, b) = (c = a + b; d = c * 2; [a, b, c, d]); def pz746 = (x = 1; y = x + 1; [x, y]); def p3746(a, b, c) = (e = [c, b, a]; e); def pc746(n) = [pa746(n, n + 1), pz746, p3746(n, :b, :c)]; [pc746(1), pc746(5)]  #=> [[[1, 2, 3, 6], [1, 2], [:c, :b, 1]], [[5, 6, 11, 22], [1, 2], [:c, :b, 5]]]
 
 # ------------------------------------------- Float-flavoured frames (#750)
 # A frame of Float arithmetic runs its stretches where a primitive's light

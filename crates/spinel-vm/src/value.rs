@@ -190,6 +190,19 @@ impl Value {
         Some(Value::from_bits(((n << 1) as u64) | FIXNUM_TAG))
     }
 
+    /// `n` as an immediate, for an `n` the caller knows is within
+    /// [`Value::FIXNUM_MIN`]`..=`[`Value::FIXNUM_MAX`], which is then not
+    /// asked again: [`Insn::GetLocalPushIntBinOp`]'s literal, which `fuse`
+    /// writes only for a fixnum (#746). Past the range it is still a fixnum,
+    /// of `n`'s low 63 bits, never anything but an immediate.
+    ///
+    /// [`Insn::GetLocalPushIntBinOp`]: crate::bytecode::Insn::GetLocalPushIntBinOp
+    #[inline]
+    pub const fn fixnum_in_range(n: i64) -> Value {
+        debug_assert!(n >= Value::FIXNUM_MIN && n <= Value::FIXNUM_MAX);
+        Value::from_bits(((n << 1) as u64) | FIXNUM_TAG)
+    }
+
     /// `d` as an immediate, or `None` when it needs a heap `Float`.
     #[inline]
     pub const fn flonum(d: f64) -> Option<Value> {

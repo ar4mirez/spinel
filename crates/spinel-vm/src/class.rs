@@ -97,6 +97,12 @@ impl CrefId {
         self.0 as usize
     }
 
+    /// The id as it is held, for a key that packs it with other words.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
     /// The inverse of [`CrefId::index`], for the slot a `Proc` stores one in.
     #[must_use]
     pub const fn from_index(index: usize) -> CrefId {
