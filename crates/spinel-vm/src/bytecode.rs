@@ -531,10 +531,14 @@ pub enum Insn {
     // of them, [`Insn::head`], and going on at the next `pc`. See
     // `docs/engine.md`.
     /// `GetLocal(slot, 0); PushInt(int); BinOp(op)`: a local of this frame and
-    /// a small integer under an operator, `i + 1` or `n < 2`. Answered in the
+    /// a small integer under an operator, `i + 1` or `n < 2`, written only
+    /// for an `int` that is a fixnum, so that its run makes the operand
+    /// without asking ([`Value::fixnum_in_range`]). Answered in the
     /// light loops, for a frame whose locals are on its stack, when the local
     /// is a fixnum and the operator answers two fixnums there; the `SetLocal`
     /// or conditional jump right after it runs with it, as after a `BinOp`.
+    ///
+    /// [`Value::fixnum_in_range`]: crate::value::Value::fixnum_in_range
     GetLocalPushIntBinOp {
         slot: u16,
         int: i64,
@@ -710,7 +714,9 @@ fn superinstruction(run: &[Insn]) -> Option<Insn> {
             Insn::PushInt(int),
             Insn::BinOp(op),
             ..,
-        ] if op.light_on_fixnums() => Some(Insn::GetLocalPushIntBinOp { slot, int, op }),
+        ] if op.light_on_fixnums() && crate::value::Value::fixnum(int).is_some() => {
+            Some(Insn::GetLocalPushIntBinOp { slot, int, op })
+        }
         [
             Insn::GetLocal(left, 0),
             Insn::GetLocal(right, 0),
@@ -1345,6 +1351,27 @@ mod tests {
             BinOp::Ge,
         ] {
             assert_eq!(BinOp::from_name(op.name()), Some(op));
+        }
+    }
+
+    /// A local and a literal under an operator are fused only for a literal
+    /// that is a fixnum, which the fused run then makes without asking: one
+    /// just past either end of the range is left as the compiler wrote it.
+    #[test]
+    fn fusing_a_literal_operand_wants_a_fixnum() {
+        let max = crate::value::Value::FIXNUM_MAX;
+        let min = crate::value::Value::FIXNUM_MIN;
+        for (int, fused) in [(max, true), (max + 1, false), (min, true), (min - 1, false)] {
+            let written = vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(int),
+                Insn::BinOp(BinOp::Lt),
+                Insn::Leave,
+            ];
+            let mut insns = written.clone();
+            fuse(&mut insns);
+            assert_eq!(insns[0] != written[0], fused, "{int}");
+            assert_eq!(insns[1..], written[1..]);
         }
     }
 

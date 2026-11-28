@@ -429,11 +429,14 @@ impl CallCaches {
             self.recent[recent] = (key, base);
             return (base, entered);
         }
-        let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
         // At least one slot, so that a body with no sites still has a base
         // of its own for `more`.
         let run =
             (iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize).max(1);
+        // The run's end fits too, so every base is below `u32::MAX`, which
+        // the call loop takes for no body at all.
+        let end = u32::try_from(self.entries.len() + run).expect("a heap under 2^32 call sites");
+        let base = end - u32::try_from(run).expect("a run within the heap's");
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
         self.behind_at.resize(self.entries.len(), 0);

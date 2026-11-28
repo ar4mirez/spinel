@@ -5841,20 +5841,22 @@ fn leave_here(scope: &mut HandleScope<'_>, stack: &mut Stack, frames: &mut Vec<C
     let floor = done.floor;
     let kept = !done.keeps_receiver && !done.discards_value;
     let booleanizes = leave && done.booleanizes_value;
-    let len = stack.values.len();
+    let values = &mut stack.values;
+    let len = values.len();
     if len > floor {
-        let value = stack.values[len - 1];
+        let value = values[len - 1];
         let value = if booleanizes {
             bool_value(value.is_truthy())
         } else {
             value
         };
         if kept {
-            stack.values[floor] = value;
-            stack.values.truncate(floor + 1);
-        } else {
-            stack.values.truncate(floor);
+            values[floor] = value;
         }
+        // SAFETY: at most `len`, since `floor < len`, and a `Value` has
+        // nothing to drop: the truncation, without its compare against the
+        // length the write above has the compiler read again (#746).
+        unsafe { values.set_len(floor + usize::from(kept)) }
         stack.low = stack.low.min(floor);
     } else {
         let value = stack.pop().unwrap_or(Value::NIL);
@@ -6254,7 +6256,8 @@ fn push_direct(
         // The keywords are written in the order their parameters' slots
         // follow the positionals: once the receiver goes, every argument is
         // where its local is.
-        place_arguments(values, at, argc + given, base);
+        debug_assert_eq!(values.len(), at + 1 + argc + given);
+        place_in_order(values, at, base);
     } else {
         place_reordered(values, at, argc, given, base, &plan.keywords);
     }
@@ -7039,6 +7042,34 @@ fn push_call(frames: &mut Vec<Call>, frame: Call) {
         frames.as_mut_ptr().add(len).write(frame);
         frames.set_len(len + 1);
     }
+}
+
+/// [`place_arguments`] for [`push_direct`], whose call left nothing on the
+/// stack above its receiver at `at` but its arguments, in their locals'
+/// order: the window they move in is the rest of the stack, and the frame's
+/// locals end at or past where they do, so what is bounds-checked and
+/// compared is the stack's length alone (#746).
+#[inline(always)]
+fn place_in_order(values: &mut Vec<Value>, at: usize, base: usize) {
+    let window = &mut values[at..];
+    match window {
+        [_] => {}
+        [receiver, first] => *receiver = *first,
+        [receiver, first, second] => (*receiver, *first) = (*first, *second),
+        _ => window.copy_within(1.., 0),
+    }
+    // Where the arguments end, now that the receiver has gone: every
+    // parameter is a local, so `base` is here or past it.
+    let placed = values.len() - 1;
+    if base == placed {
+        // SAFETY: below the length, and a `Value` has nothing to drop.
+        unsafe { values.set_len(base) }
+        return;
+    }
+    // The last argument's old slot is a local now, and starts `nil`, as
+    // the ones past it do.
+    values[placed] = Value::NIL;
+    values.resize(base, Value::NIL);
 }
 
 /// [`send_bound`]'s binding of the arguments a call left on the stack above
@@ -20595,11 +20626,13 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 // and the operator's own arithmetic straight away, rather
                 // than a second jump on `op` inside `fixnum_binop` (#746).
                 let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+                // A fixnum: `fuse` writes this instruction for no other.
+                let right = Value::fixnum_in_range(int);
                 let answer = |op: BinOp| {
                     if ops & (1 << op as usize) == 0 {
                         return None;
                     }
-                    Value::fixnum(int).and_then(|right| fixnum_binop(op, local, right))
+                    fixnum_binop(op, local, right)
                 };
                 let value = match op {
                     BinOp::Add => answer(BinOp::Add),
@@ -21322,8 +21355,11 @@ fn stretch<const MORE: bool, const COPIED: bool>(
 /// would, for as long as one `run_calls` lasts; it is never kept longer.
 #[derive(Clone, Copy)]
 struct Masks {
-    /// The scope and the body's cache base the masks were worked out for.
-    key: Option<(CrefId, u32)>,
+    /// The scope and the body's cache base the masks were worked out for,
+    /// as one word ([`Masks::key_of`]), or [`Masks::NO_KEY`]: a compare of
+    /// one register at every stretch's start, where a pair under an
+    /// `Option` was three (#746).
+    key: u64,
     ops: Option<u32>,
     float_ops: Option<u32>,
 }
@@ -21331,15 +21367,25 @@ struct Masks {
 impl Masks {
     /// Nothing kept: what a stretch run alone starts and ends with.
     const NONE: Masks = Masks {
-        key: None,
+        key: Masks::NO_KEY,
         ops: None,
         float_ops: None,
     };
 
+    /// No frame's key: every body's cache base is below `u32::MAX`
+    /// ([`UNCHECKED`]).
+    const NO_KEY: u64 = u64::MAX;
+
+    /// The scope and the cache base of `frame`, as one word.
+    #[inline(always)]
+    fn key_of(frame: &Call) -> u64 {
+        (u64::from(frame.cref.raw()) << 32) | u64::from(frame.cache_base)
+    }
+
     /// A [`Lazy`] for a stretch of `frame`, holding what was kept for it.
     #[inline(always)]
     fn seed(&self, frame: &Call) -> Lazy {
-        if self.key == Some((frame.cref, frame.cache_base)) {
+        if self.key == Masks::key_of(frame) {
             Lazy {
                 ops: self.ops,
                 float_ops: self.float_ops,
@@ -21354,7 +21400,7 @@ impl Masks {
     #[inline(always)]
     fn keep(&mut self, frame: &Call, lazy: &Lazy) {
         *self = Masks {
-            key: Some((frame.cref, frame.cache_base)),
+            key: Masks::key_of(frame),
             ops: lazy.ops,
             float_ops: lazy.float_ops,
         };
@@ -21429,7 +21475,7 @@ fn run_calls(
         // How many may run before the budget reaches `limit`.
         room: budget.saturating_sub(limit),
         ran: 0,
-        entered: 0,
+        start: frames.len(),
         left: false,
         // Entered at the call a stretch stopped at.
         stretch_first: false,
@@ -21469,9 +21515,9 @@ struct CallsState {
     /// How many may run before the budget reaches `limit`, and how many have.
     room: u64,
     ran: u64,
-    /// The frames pushed here that are still there, and whether a return has
-    /// gone below the frame it started in.
-    entered: usize,
+    /// How many frames there were when it started, and whether a return
+    /// has gone below the frame it started in since: so when fewer remain.
+    start: usize,
     left: bool,
     /// Whether the loop starts with a stretch of the running frame, rather
     /// than at the instruction a stretch stopped at: so when one flavour of
@@ -21485,12 +21531,14 @@ struct CallsState {
 }
 
 impl CallsState {
-    /// A frame returned: one pushed here, or one below where it started.
+    /// A frame returned, and `remaining` are left: below where it started,
+    /// when that is fewer than there were then. A count of the frames
+    /// pushed here, raised at every call and lowered at every return, says
+    /// the same with a write at each and a test at the return (#746).
     #[inline(always)]
-    fn left_one(&mut self) {
-        match self.entered.checked_sub(1) {
-            Some(entered) => self.entered = entered,
-            None => self.left = true,
+    fn left_one(&mut self, remaining: usize) {
+        if remaining < self.start {
+            self.left = true;
         }
     }
 }
@@ -21518,6 +21566,12 @@ fn calls_loop<const MORE: bool>(
     let room = state.room;
     let mut ran = state.ran;
     let mut masks = state.masks;
+    // The body whose frames are known to run in this flavour: the running
+    // frame's, which `run_calls` or the other flavour has just asked about.
+    // Only `calls_more` sets a body's flag within the loop, so the lookup
+    // after each step is made only once the top frame's body is another,
+    // or after `calls_more` ran (#746).
+    let mut checked = frames[frames.len() - 1].cache_base;
     let mut insn = if std::mem::take(&mut state.stretch_first) {
         let top = frames.len() - 1;
         if MORE {
@@ -21618,7 +21672,6 @@ fn calls_loop<const MORE: bool>(
             // Where the caller resumes, and what a backtrace taken in the
             // callee reads for the caller's line.
             frames[top].pc = at + 1;
-            state.entered += 1;
             at = 0;
         } else if matches!(insn, Insn::Return)
             && top > 0
@@ -21626,7 +21679,7 @@ fn calls_loop<const MORE: bool>(
             && leaves_untraced(frames, top)
         {
             leave_here(scope, stack, frames, false);
-            state.left_one();
+            state.left_one(frames.len());
             at = frames.last().expect("the caller").pc;
         } else {
             match insn {
@@ -21635,7 +21688,7 @@ fn calls_loop<const MORE: bool>(
                     if top > 0 && !frame.raises_receiver && leaves_untraced(frames, top) =>
                 {
                     leave_here(scope, stack, frames, true);
-                    state.left_one();
+                    state.left_one(frames.len());
                     at = frames.last().expect("the caller").pc;
                 }
                 // A symbol literal: an immediate, as `run`'s arm pushes it.
@@ -21652,6 +21705,9 @@ fn calls_loop<const MORE: bool>(
                     if !calls_more(scope, stack, frame, insn) {
                         break false;
                     }
+                    // A Float operator may have just made this body's
+                    // stretches `more_stretch`'s.
+                    checked = UNCHECKED;
                     at += 1;
                 }
                 // A local set to a heap value, which a light stretch leaves for
@@ -21695,9 +21751,15 @@ fn calls_loop<const MORE: bool>(
         // A Float operator run above may have just made this frame's
         // stretches `more_stretch`'s; a call or a return may have reached a
         // frame of the other flavour.
-        if scope.call_caches().wants_more(frames[top].cache_base) != MORE {
-            state.stretch_first = true;
-            break true;
+        // The `more_stretch` flavour asks every time: there the memo's
+        // register cost `nbody` more than the lookups it saved.
+        let base = frames[top].cache_base;
+        if MORE || base != checked {
+            if scope.call_caches().wants_more(base) != MORE {
+                state.stretch_first = true;
+                break true;
+            }
+            checked = base;
         }
         // A stretch would stop at once at an instruction answered here, and
         // its setting up and putting away is then all it would do: the
@@ -21743,6 +21805,13 @@ fn calls_loop<const MORE: bool>(
     state.masks = masks;
     switched
 }
+
+/// What [`calls_loop`]'s memo of the body last asked about holds when no
+/// body is known to be of the running flavour. Every body's cache base is
+/// below it: [`CallCaches::enter`] hands out none whose run would reach it.
+///
+/// [`CallCaches::enter`]: crate::callcache::CallCaches::enter
+const UNCHECKED: u32 = u32::MAX;
 
 /// Whether a [`stretch`] stops at `insn` before running anything, with
 /// nothing changed, for [`calls_loop`] to answer it: none of these is a
